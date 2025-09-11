@@ -1,0 +1,6 @@
+Nom : Hastune Miku
+Classe: Artificière 
+Niveau : 1
+Points de vie maximum : 100
+Points de vie actuels : 40
+Inventaire : 3 potions
