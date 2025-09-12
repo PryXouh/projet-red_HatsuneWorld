@@ -3,24 +3,16 @@ package main
 import "fmt"
 
 func main() {
-	type Personnage struct {
-    Nom             string
-    Classe          string
-    Niveau          int
-    PVMax           int
-    PVActuels       int
-    Potions         int
-	Arme			string
+	type  Menu struct {
+		Commencer string
+		Stop string
+		Informations string
 	}
 
-    hero := Personnage {
-        Nom:       "Hatsune Miku",
-        Classe:    "Chevalière",
-        Niveau:    1,
-        PVMax:     100,
-        PVActuels: 50,
-        Potions:   2,
-		Arme:      "Sabre",
+	UI := Menu {
+		Commencer: "Start Game: (a)",
+		Stop: "Pause: (Z)",
+		Informations: "Menu: (m)",
 	}
-	fmt.Println(hero)
+	fmt.Println(UI)
 }
