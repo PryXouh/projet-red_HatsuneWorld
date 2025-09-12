@@ -2,7 +2,7 @@ package main
 
 import "fmt"
 
-func initCharacter() {
+func main() {
 	type Personnage struct {
 		Nom	string
 		Classe string
@@ -14,13 +14,13 @@ func initCharacter() {
 		}
 
 	hero := Personnage {
-		Nom: "Nom: Hatsune Miku, ",
+		Nom: " -----   Nom: Hatsune Miku, ",
 		Classe: "Classe: Chevalière, ",
 		Niveau: "Niveau: 1, ",
 		PVMax: "PVMax: 100, ",
 		PVActuels: "PVActuels: 50, ",
 		Potions: "Potions: 2, ",
-		Armes: "Armes: Sabre",
+		Armes: "Armes: Sabre   ----- ",
 	}
 	fmt.Println(hero)
 }
