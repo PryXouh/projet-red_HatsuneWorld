@@ -15,6 +15,8 @@ func main() {
 		Commencer: "-----   Start Game: (a)",
 		Stop: "Pause: (z)",
 		Informations: "Menu: (m)  -----",
+
+	
 	}
 	fmt.Println(UI)
 }
