@@ -93,8 +93,8 @@ Pour le lore complet, voir **docs/** → *Bible d’univers*.
 
 ```bash
 # 1) Cloner le dépôt
-git clone https://github.com/ORG/projet-red_NOM-DU-PROJET.git
-cd projet-red_NOM-DU-PROJET
+git clone https://github.com/PryXouh/projet-red_HatsuneWorld
+cd projet-red_HatsuneWorld
 
 # 2) Initialiser les dépendances (si besoin)
 go mod tidy
@@ -122,7 +122,7 @@ go build -o red-cli ./src
 ## 🗂️ Structure du dépôt
 
 ```
-projet-red_NOM-DU-PROJET/
+projet-projet-red_HatsuneWorld/
 ├─ src/                        # Code du jeu
 │  ├─ main.go                  # Entrée du programme
 │  ├─ character/               # Structures & init perso
