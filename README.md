@@ -1,4 +1,4 @@
-# 🎮 Hatsune Miku et la Cassette Légendaire — Projet RED (CLI en Go)
+# 🎮 Hatsune Miku et la Cassette LégendRaire — Projet RED en Go
 
 <!-- Banner / Logo principal -->
 <!-- TODO: Remplacer par votre bannière -->
