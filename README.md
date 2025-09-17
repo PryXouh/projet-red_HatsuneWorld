@@ -122,20 +122,15 @@ go build -o red-cli ./src
 
 ```
 projet-projet-red_HatsuneWorld/
-├─ src/                        # Code du jeu
-│  ├─ main.go                  # Entrée du programme
-│  ├─ character/               # Structures & init perso
-│  ├─ inventory/               # Inventaire, items, limites
-│  ├─ shop/                    # Marchand (disquaire), achats
-│  ├─ forge/                   # Ingé son (craft équipements/disques)
-│  ├─ combat/                  # Boucle, initiative, pattern ennemis
-│  └─ utils/                   # Helpers (I/O, validation nom, etc.)
+├─ src/                       
 ├─ docs/
 │  ├─ bible_univers.md         # **Notre Bible verrouillée** ✅
 │  ├─ images/                  # Captures & schémas (placeholders)
 │  └─ presentation.pdf         # Slides orales (optionnel)
 ├─ README.md                   # Cette page
 └─ LICENSE                     # Licence (optionnelle)
+└─ hatsuneword.go
+└─ startmenu.go
 ```
 
 ---
