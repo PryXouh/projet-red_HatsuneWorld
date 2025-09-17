@@ -1,10 +1,11 @@
-package main
+package start
 
 import (
 	"bufio"
 	"fmt"
 	"os"
 	"strings"
+	"hatsuneworld/logic"
 )
 
 const Title = `        .__            __                                                   .__       .___
@@ -51,7 +52,7 @@ func ShowMenu() {
 		switch choice {
 		case 'a', 'r':
 			fmt.Println("La partie commence ! Appuie sur 'q' pour revenir ici a tout moment.")
-			RunGame()
+			logic.RunGame()
 			fmt.Println("\nRetour au menu principal.\n")
 
 		case 'z':
