@@ -51,6 +51,7 @@ const (
     enemyFarm  EnemyType = "farm"
 )
 
+// Decrit un objet disponible dans le jeu
 type ItemDefinition struct {
     ID           string
     Name         string
@@ -61,6 +62,7 @@ type ItemDefinition struct {
     BetPointCost int
 }
 
+// Recette permettant de fabriquer un objet
 type RecipeDefinition struct {
     ID        string
     Name      string
@@ -69,6 +71,7 @@ type RecipeDefinition struct {
     CraftCost int
 }
 
+// Statistiques et etat d'un personnage jouable
 type Character struct {
     Name         string
     Class        string
@@ -91,6 +94,7 @@ type Character struct {
     ShieldHP    int
 }
 
+// Caracteristiques d'un adversaire
 type Enemy struct {
     Name      string
     Type      EnemyType
@@ -106,6 +110,7 @@ type Enemy struct {
     SilenceTurns int
 }
 
+// Options qui configurent un combat
 type battleOptions struct {
     AllowBet     bool
     AllowEscape  bool
@@ -118,6 +123,7 @@ type battleOptions struct {
     IsBoss       bool
 }
 
+// Suit le deblocage et l'avancement d'une zone
 type ZoneStatus struct {
     Unlocked  bool
     Completed bool
@@ -134,6 +140,7 @@ func zoneLabel(z ZoneStatus) string {
     }
 }
 
+// Contenu serialise d'une sauvegarde
 type SaveState struct {
     ProfileName     string
     PlayerIndex     int
@@ -150,6 +157,7 @@ type SaveState struct {
     Timestamp       time.Time
 }
 
+// Gestionnaire des fichiers de sauvegarde
 type SaveManager struct {
     base string
 }
@@ -274,6 +282,7 @@ func (sm *SaveManager) list() ([]string, error) {
     return names, nil
 }
 
+// Etat global de la partie en cours
 type Game struct {
     PlayerIndex     int
     Characters      []*Character
@@ -332,6 +341,7 @@ const (
     effCrew        = "crew"
 )
 
+// Catalogue des objets achetables ou trouvables
 var items = map[string]ItemDefinition{
     "potion_hp":     {ID: "potion_hp", Name: "Potion de vie", Description: "Rend 50 HP", Type: itemConsumable, Price: 3, EffectID: effHeal},
     "potion_mana":   {ID: "potion_mana", Name: "Potion d'energie", Description: "Rend 20 MP", Type: itemConsumable, Price: 5, EffectID: effMana},
@@ -356,6 +366,7 @@ var items = map[string]ItemDefinition{
     "crew_totem":    {ID: "crew_totem", Name: "Pouvoir d'invocation", Description: "Invoque le crew de Kaaris", Type: itemSpecial, EffectID: effCrew},
 }
 
+// Recettes disponibles chez le forgeron
 var recipes = []RecipeDefinition{
     {ID: "rec_hat", Name: "Chapeau de scene", Inputs: []string{"mat_corb", "mat_sanglier"}, OutputID: "equip_hat", CraftCost: 5},
     {ID: "rec_boot", Name: "Bottes de scene", Inputs: []string{"mat_loup", "mat_sanglier"}, OutputID: "equip_boot", CraftCost: 5},
@@ -366,6 +377,7 @@ var recipes = []RecipeDefinition{
     {ID: "rec_disc_c", Name: "Disque Corbeau", Inputs: []string{"mat_corb", "potion_poison"}, OutputID: "disc_corb", CraftCost: 0},
 }
 
+// Implementation des effets declenches par chaque objet
 var effects = map[string]func(g *Game, c *Character, enemy *Enemy) bool{
     effHeal: func(g *Game, c *Character, enemy *Enemy) bool {
         heal := 50
@@ -610,6 +622,7 @@ func showPartyHud(party []*Character, enemies []Enemy) {
 
 
 
+// Applique un objet sur un personnage et une cible eventuelle
 func applyItem(g *Game, c *Character, enemy *Enemy, id string) bool {
     def, ok := items[id]
     if !ok {
@@ -625,6 +638,7 @@ func applyItem(g *Game, c *Character, enemy *Enemy, id string) bool {
     return consumed
 }
 
+// Tente d'ajouter un objet a l'inventaire
 func (c *Character) addItem(id string) bool {
     if len(c.Inventory) >= c.InventoryMax {
         fmt.Println("Votre sacoche est pleine.")
@@ -634,6 +648,7 @@ func (c *Character) addItem(id string) bool {
     return true
 }
 
+// Retire une liste d'objets si tous sont disponibles
 func (c *Character) removeItems(ids []string) bool {
     needed := map[string]int{}
     for _, id := range ids {
@@ -658,6 +673,7 @@ func (c *Character) removeItems(ids []string) bool {
     return true
 }
 
+// Ajoute de l'experience et gere les montees de niveau
 func (c *Character) gainXP(amount int) {
     c.XP += amount
     for c.XP >= 100 {
@@ -671,6 +687,7 @@ func (c *Character) gainXP(amount int) {
     }
 }
 
+// Reanime un personnage a moitie de sa vie si necessaire
 func (c *Character) reviveIfNeeded() {
     if c.HP <= 0 {
         heal := c.MaxHP / 2
@@ -683,6 +700,7 @@ func (c *Character) reviveIfNeeded() {
     }
 }
 
+// Reinitialise les etats temporaires d'un combat
 func (c *Character) resetCombatFlags() {
     c.SpecialUsed = false
     c.BattleBoost = 0
@@ -691,6 +709,7 @@ func (c *Character) resetCombatFlags() {
     c.ShieldHP = 0
 }
 
+// Affiche les caracteristiques du personnage actif
 func (c *Character) printStats() {
     fmt.Printf("\n%s [%s] - Niveau %d\n", c.Name, c.Class, c.Level)
     fmt.Printf("HP: %d/%d | Mana: %d/%d | XP: %d/100\n", c.HP, c.MaxHP, c.Mana, c.MaxMana, c.XP)
@@ -705,6 +724,7 @@ func (c *Character) printStats() {
     }
 }
 
+// Construit une nouvelle partie ou recharge une sauvegarde
 func newGame(sm *SaveManager, profile string, state *SaveState) *Game {
     g := &Game{
         rng:            rand.New(rand.NewSource(time.Now().UnixNano())),
@@ -776,6 +796,7 @@ func newGame(sm *SaveManager, profile string, state *SaveState) *Game {
     return g
 }
 
+// Prepare un instantane pour la sauvegarde
 func (g *Game) snapshot() SaveState {
     chars := make([]Character, len(g.Characters))
     for i, ch := range g.Characters {
@@ -799,6 +820,7 @@ func (g *Game) snapshot() SaveState {
     }
 }
 
+// Sauvegarde automatiquement la progression
 func (g *Game) autoSave() {
     if g.saver == nil {
         return
@@ -810,6 +832,7 @@ func (g *Game) autoSave() {
     }
 }
 
+// Recupere le personnage actuellement controle
 func (g *Game) active() *Character {
     if g.PlayerIndex < 0 || g.PlayerIndex >= len(g.Characters) {
         g.PlayerIndex = 0
@@ -817,6 +840,7 @@ func (g *Game) active() *Character {
     return g.Characters[g.PlayerIndex]
 }
 
+// Donne un materiau aleatoire en recompense
 func (g *Game) rewardMaterial(target *Character) {
     pool := append([]string{}, g.materialItems...)
     if len(pool) == 0 {
@@ -828,6 +852,7 @@ func (g *Game) rewardMaterial(target *Character) {
     }
 }
 
+// Interface d'utilisation des objets en combat
 func (g *Game) useInventory(reader *bufio.Reader, user *Character, soloEnemy *Enemy, group []Enemy) bool {
     if len(user.Inventory) == 0 {
         fmt.Println("Votre sacoche est vide.")
@@ -898,6 +923,7 @@ func (g *Game) useInventory(reader *bufio.Reader, user *Character, soloEnemy *En
 }
 
 
+// Menu d'achat chez le disquaire
 func (g *Game) handleMerchant(reader *bufio.Reader) {
     fmt.Println("\n=== Disquaire independant ===")
     listing := append([]string{}, g.merchantItems...)
@@ -953,6 +979,7 @@ func (g *Game) handleMerchant(reader *bufio.Reader) {
     fmt.Printf("Vous achetez %s.\n", def.Name)
 }
 
+// Convertit les identifiants d'ingredients en noms affichables
 func recipeInputs(ids []string) []string {
     out := make([]string, len(ids))
     for i, id := range ids {
@@ -965,6 +992,7 @@ func recipeInputs(ids []string) []string {
     return out
 }
 
+// Menu de craft et de fabrication
 func (g *Game) handleCraft(reader *bufio.Reader) {
     if !g.CraftUnlocked {
         fmt.Println("Le forgeron Spartan n'est pas disponible pour l'instant.")
@@ -1006,6 +1034,7 @@ func (g *Game) handleCraft(reader *bufio.Reader) {
     fmt.Printf("Vous forgez %s.\n", rec.Name)
 }
 
+// Pose une question a choix multiples au joueur
 func (g *Game) dialogueChoice(reader *bufio.Reader, prompt string, options []string) (int, bool) {
     for {
         fmt.Println(prompt)
@@ -1025,6 +1054,7 @@ func (g *Game) dialogueChoice(reader *bufio.Reader, prompt string, options []str
     }
 }
 
+// Scene d'introduction et tutoriel
 func (g *Game) prologue(reader *bufio.Reader) {
     banner("Chapitre 0 - Cassette volee")
     block(reader,
@@ -1060,6 +1090,7 @@ func (g *Game) prologue(reader *bufio.Reader) {
     g.autoSave()
 }
 
+// Hub permettant de selectionner la prochaine zone
 func (g *Game) artistHub(reader *bufio.Reader) {
     for {
         banner("Carte du monde sonore")
@@ -1127,6 +1158,7 @@ func (g *Game) artistHub(reader *bufio.Reader) {
     }
 }
 
+// Mini-jeu de rythme pour convaincre MJ
 func (g *Game) playRhythmChallenge(reader *bufio.Reader) bool {
     patterns := [][]string{
         {"MI", "KU", "MI", "KU"},
@@ -1156,6 +1188,7 @@ func (g *Game) playRhythmChallenge(reader *bufio.Reader) bool {
     return false
 }
 
+// Quete de recrutement de Michael Jackson
 func (g *Game) zoneMichael(reader *bufio.Reader) {
     banner("Neonopolis Pop")
     block(reader,
@@ -1201,6 +1234,7 @@ func (g *Game) zoneMichael(reader *bufio.Reader) {
     g.autoSave()
 }
 
+// Quete de recrutement de Kaaris
 func (g *Game) zoneKaaris(reader *bufio.Reader) {
     banner("Banlieue Rugueuse")
     block(reader,
@@ -1261,6 +1295,7 @@ func (g *Game) zoneKaaris(reader *bufio.Reader) {
     }
 }
 
+// Quete de recrutement d'Emmanuel Macron
 func (g *Game) macronMission(reader *bufio.Reader) {
     status := g.ZoneStatus[zoneMacron]
     if !status.Unlocked {
@@ -1327,6 +1362,7 @@ func (g *Game) macronMission(reader *bufio.Reader) {
     g.StoryStage = stageLabel
     g.autoSave()
 }
+// Combat final contre le label Pouler.fr
 func (g *Game) labelFinal(reader *bufio.Reader) {
     if !g.ZoneStatus[zoneMacron].Completed {
         fmt.Println("Rassemble Macron avant de prendre d'assaut le label.")
@@ -1406,6 +1442,7 @@ func (g *Game) labelFinal(reader *bufio.Reader) {
     g.StoryStage = stageFinish
     g.autoSave()
 }
+// Valeur d'attaque de base selon le personnage
 func baseAttack(c *Character) int {
     switch c.Name {
     case "Kaaris":
@@ -1420,6 +1457,7 @@ func baseAttack(c *Character) int {
 }
 
 
+// Gere les capacites speciales contextuelles
 func (g *Game) performSpecial(reader *bufio.Reader, c *Character, enemy *Enemy, party []*Character) (bool, bool) {
     if c == nil {
         return false, false
@@ -1662,6 +1700,7 @@ func (g *Game) performSpecial(reader *bufio.Reader, c *Character, enemy *Enemy, 
 
 
 
+// Boucle de combat pour les duels
 func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) bool {
     player := g.active()
     player.resetCombatFlags()
@@ -1975,6 +2014,7 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
 
 
 
+// Indique si tous les ennemis sont vaincus
 func allEnemiesDown(enemies []Enemy) bool {
     for _, e := range enemies {
         if e.HP > 0 {
@@ -1984,6 +2024,7 @@ func allEnemiesDown(enemies []Enemy) bool {
     return true
 }
 
+// Verifie si toute l'equipe est KO
 func allAlliesDown(party []*Character) bool {
     for _, c := range party {
         if c.HP > 0 {
@@ -1993,6 +2034,7 @@ func allAlliesDown(party []*Character) bool {
     return true
 }
 
+// Choisit un allie vivant au hasard
 func targetAlive(rng *rand.Rand, party []*Character) *Character {
     alive := []*Character{}
     for _, ch := range party {
@@ -2006,6 +2048,7 @@ func targetAlive(rng *rand.Rand, party []*Character) *Character {
     return alive[rng.Intn(len(alive))]
 }
 
+// Gestion des combats de groupe
 func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []Enemy, opts battleOptions) bool {
     for _, ch := range party {
         ch.resetCombatFlags()
@@ -2366,6 +2409,7 @@ func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []En
 }
 
 
+// Renvoie l'indice du premier ennemi encore debout
 func firstAliveEnemy(enemies []Enemy) int {
     for i, e := range enemies {
         if e.HP > 0 {
@@ -2375,6 +2419,7 @@ func firstAliveEnemy(enemies []Enemy) int {
     return -1
 }
 
+// Selectionne une cible ennemie via le joueur
 func selectEnemy(reader *bufio.Reader, enemies []Enemy) (*Enemy, bool) {
     if len(enemies) == 0 {
         return nil, false
@@ -2398,6 +2443,7 @@ func selectEnemy(reader *bufio.Reader, enemies []Enemy) (*Enemy, bool) {
     }
 }
 
+// Liste les allies actuellement disponibles
 func (g *Game) party() []*Character {
     var out []*Character
     for _, ch := range g.Characters {
@@ -2408,6 +2454,7 @@ func (g *Game) party() []*Character {
     return out
 }
 
+// Menu pause accessible pendant un combat
 func (g *Game) battlePause(reader *bufio.Reader) string {
     fmt.Println("\n=== Pause combat ===")
     fmt.Println("1) Reprendre")
@@ -2431,6 +2478,7 @@ func (g *Game) battlePause(reader *bufio.Reader) string {
     return "resume"
 }
 
+// Session d'entrainement pour ameliorer l'equipe
 func (g *Game) training(reader *bufio.Reader) {
     fmt.Println("\n=== Entrainement ===")
     hp := g.TrainingBaseHP + g.TrainingLevel*6
@@ -2460,6 +2508,7 @@ func (g *Game) training(reader *bufio.Reader) {
     }
 }
 
+// Combat de farm pour recolter or et XP
 func (g *Game) farm(reader *bufio.Reader) {
     fmt.Println("\n=== Farm d'EXP ===")
     hp := 70 + g.FarmLevel*12
@@ -2479,6 +2528,7 @@ func (g *Game) farm(reader *bufio.Reader) {
     }
 }
 
+// Choix ou creation d'un profil de sauvegarde
 func promptProfile(sm *SaveManager, reader *bufio.Reader) (string, *SaveState) {
     for {
         profiles, err := sm.list()
@@ -2525,6 +2575,7 @@ func promptProfile(sm *SaveManager, reader *bufio.Reader) (string, *SaveState) {
     }
 }
 
+// Permet de changer de personnage jouable
 func (g *Game) chooseCharacter(reader *bufio.Reader) {
     fmt.Println("\n=== Choix de personnage ===")
     for i, ch := range g.Characters {
@@ -2551,6 +2602,8 @@ func (g *Game) chooseCharacter(reader *bufio.Reader) {
     fmt.Printf("Vous incarnez maintenant %s.\n", g.active().Name)
 }
 
+// Declenche la prochaine etape du scenario
+// Boucle principale du jeu
 func (g *Game) runNextStory(reader *bufio.Reader) {
     switch g.StoryStage {
     case stagePrologue:
@@ -2625,6 +2678,7 @@ func (g *Game) run(reader *bufio.Reader) {
 
 
 
+// Point d'entree du programme
 func main() {
     reader := bufio.NewReader(os.Stdin)
     sm := newSaveManager(saveDirName)
@@ -2633,6 +2687,7 @@ func main() {
     game.run(reader)
 }
 
+// Affiche l'etat des ennemis pendant un combat
 func printEnemies(enemies []Enemy) {
     for i, e := range enemies {
         status := fmt.Sprintf("%d/%d HP", e.HP, e.MaxHP)
