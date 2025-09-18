@@ -88,6 +88,7 @@ type Character struct {
     BattleBoost int
     IgnoreGuard bool
     DodgeNext   bool
+    ShieldHP    int
 }
 
 type Enemy struct {
@@ -102,6 +103,7 @@ type Enemy struct {
     PoisonTurns int
     PoisonDmg   int
     WeakenTurns int
+    SilenceTurns int
 }
 
 type battleOptions struct {
@@ -292,6 +294,22 @@ type Game struct {
     materialItems []string
     boostItems    []string
     recipes       []RecipeDefinition
+
+    menuReturnRequested bool
+}
+
+var activeGame *Game
+
+func setActiveGame(g *Game) {
+    activeGame = g
+}
+
+func (g *Game) consumeMenuReturn() bool {
+    if g == nil || !g.menuReturnRequested {
+        return false
+    }
+    g.menuReturnRequested = false
+    return true
 }
 
 const (
@@ -497,10 +515,14 @@ var effects = map[string]func(g *Game, c *Character, enemy *Enemy) bool{
 }
 func read(reader *bufio.Reader) string {
     line, err := reader.ReadString('\n')
-    if err != nil {
-        return strings.TrimSpace(line)
+    trimmed := strings.TrimSpace(line)
+    if activeGame != nil && strings.EqualFold(trimmed, "menu") {
+        activeGame.menuReturnRequested = true
     }
-    return strings.TrimSpace(line)
+    if err != nil {
+        return trimmed
+    }
+    return trimmed
 }
 
 func banner(title string) {
@@ -522,6 +544,7 @@ func block(reader *bufio.Reader, lines ...string) {
 
 func shortRest(party []*Character) {
     for _, ch := range party {
+        ch.ShieldHP = 0
         if ch.HP <= 0 {
             continue
         }
@@ -535,19 +558,41 @@ func shortRest(party []*Character) {
         }
     }
 }
+func absorbShieldDamage(target *Character, dmg int) int {
+    if target == nil || target.ShieldHP <= 0 || dmg <= 0 {
+        return dmg
+    }
+    absorbed := dmg
+    if absorbed > target.ShieldHP {
+        absorbed = target.ShieldHP
+    }
+    target.ShieldHP -= absorbed
+    fmt.Printf("Le bouclier de %s absorbe %d degats.\n", target.Name, absorbed)
+    return dmg - absorbed
+}
+
 
 func showSoloHud(player *Character, enemy *Enemy) {
     fmt.Println()
-    fmt.Printf("%s | HP %d/%d | MP %d/%d | Points de mise %d\n", player.Name, player.HP, player.MaxHP, player.Mana, player.MaxMana, player.BetPts)
+    status := fmt.Sprintf("%s | HP %d/%d | MP %d/%d | Points de mise %d", player.Name, player.HP, player.MaxHP, player.Mana, player.MaxMana, player.BetPts)
+    if player.ShieldHP > 0 {
+        status += fmt.Sprintf(" | Bouclier %d", player.ShieldHP)
+    }
+    fmt.Println(status)
     fmt.Printf("%s | HP %d/%d | ATK %d | Style %s\n\n", enemy.Name, enemy.HP, enemy.MaxHP, enemy.Attack, enemy.Style)
 }
+
+
 
 func showPartyHud(party []*Character, enemies []Enemy) {
     fmt.Println("\n-- Equipe --")
     for _, ch := range party {
-        status := fmt.Sprintf("HP %d/%d | MP %d/%d", ch.HP, ch.MaxHP, ch.Mana, ch.MaxMana)
-        if ch.HP <= 0 {
-            status = "KO"
+        status := "KO"
+        if ch.HP > 0 {
+            status = fmt.Sprintf("HP %d/%d | MP %d/%d", ch.HP, ch.MaxHP, ch.Mana, ch.MaxMana)
+            if ch.ShieldHP > 0 {
+                status += fmt.Sprintf(" | Bouclier %d", ch.ShieldHP)
+            }
         }
         fmt.Printf("%s: %s\n", ch.Name, status)
     }
@@ -561,6 +606,7 @@ func showPartyHud(party []*Character, enemies []Enemy) {
     }
     fmt.Println()
 }
+
 
 
 
@@ -632,6 +678,7 @@ func (c *Character) reviveIfNeeded() {
             heal = 1
         }
         c.HP = heal
+        c.ShieldHP = 0
         fmt.Printf("Les fans relevent %s (%d HP).\n", c.Name, c.HP)
     }
 }
@@ -641,12 +688,16 @@ func (c *Character) resetCombatFlags() {
     c.BattleBoost = 0
     c.IgnoreGuard = false
     c.DodgeNext = false
+    c.ShieldHP = 0
 }
 
 func (c *Character) printStats() {
     fmt.Printf("\n%s [%s] - Niveau %d\n", c.Name, c.Class, c.Level)
     fmt.Printf("HP: %d/%d | Mana: %d/%d | XP: %d/100\n", c.HP, c.MaxHP, c.Mana, c.MaxMana, c.XP)
     fmt.Printf("Points de mise: %d | Inventaire: %d/%d\n", c.BetPts, len(c.Inventory), c.InventoryMax)
+    if c.ShieldHP > 0 {
+        fmt.Printf("Bouclier actif: %d HP absorbables\n", c.ShieldHP)
+    }
     if c.HasNoteSpell {
         fmt.Println("Sort appris: Note explosive")
     } else {
@@ -793,6 +844,9 @@ func (g *Game) useInventory(reader *bufio.Reader, user *Character, soloEnemy *En
     fmt.Println("0) Retour")
     fmt.Print("Choix: ")
     choice, err := strconv.Atoi(read(reader))
+    if g.consumeMenuReturn() {
+        return false
+    }
     if err != nil || choice < 0 || choice > len(user.Inventory) {
         fmt.Println("Choix invalide.")
         return false
@@ -813,28 +867,25 @@ func (g *Game) useInventory(reader *bufio.Reader, user *Character, soloEnemy *En
         if soloEnemy != nil {
             target = soloEnemy
         } else {
-            alive := []int{}
+            alive := 0
             for i := range group {
                 if group[i].HP > 0 {
-                    alive = append(alive, i)
+                    alive++
                 }
             }
-            if len(alive) == 0 {
+            if alive == 0 {
                 fmt.Println("Aucun adversaire valide pour cet objet.")
                 return false
             }
-            fmt.Println("Cibles:")
-            for _, i := range alive {
-                enemy := group[i]
-                fmt.Printf("%d) %s (HP %d/%d)\n", i+1, enemy.Name, enemy.HP, enemy.MaxHP)
+            tgt, abort := selectEnemy(reader, group)
+            if abort {
+                return false
             }
-            fmt.Print("Cible: ")
-            tgt, err := strconv.Atoi(read(reader))
-            if err != nil || tgt <= 0 || tgt > len(group) || group[tgt-1].HP <= 0 {
+            if tgt == nil {
                 fmt.Println("Cible invalide.")
                 return false
             }
-            target = &group[tgt-1]
+            target = tgt
         }
     } else {
         target = soloEnemy
@@ -874,6 +925,9 @@ func (g *Game) handleMerchant(reader *bufio.Reader) {
     fmt.Println("0) Retour")
     fmt.Print("Choix: ")
     choice, err := strconv.Atoi(read(reader))
+    if g.consumeMenuReturn() {
+        return
+    }
     if err != nil || choice <= 0 || choice > len(listing) {
         fmt.Println("Pas d'achat.")
         return
@@ -925,6 +979,9 @@ func (g *Game) handleCraft(reader *bufio.Reader) {
     fmt.Println("0) Retour")
     fmt.Print("Choix: ")
     choice, err := strconv.Atoi(read(reader))
+    if g.consumeMenuReturn() {
+        return
+    }
     if err != nil || choice <= 0 || choice > len(g.recipes) {
         fmt.Println("Aucun craft.")
         return
@@ -949,16 +1006,20 @@ func (g *Game) handleCraft(reader *bufio.Reader) {
     fmt.Printf("Vous forgez %s.\n", rec.Name)
 }
 
-func dialogueChoice(reader *bufio.Reader, prompt string, options []string) int {
+func (g *Game) dialogueChoice(reader *bufio.Reader, prompt string, options []string) (int, bool) {
     for {
         fmt.Println(prompt)
         for i, opt := range options {
             fmt.Printf("%d) %s\n", i+1, opt)
         }
         fmt.Print("Reponse: ")
-        choice, err := strconv.Atoi(read(reader))
+        input := read(reader)
+        if g.consumeMenuReturn() {
+            return 0, true
+        }
+        choice, err := strconv.Atoi(input)
         if err == nil && choice >= 1 && choice <= len(options) {
-            return choice - 1
+            return choice - 1, false
         }
         fmt.Println("Choix invalide.")
     }
@@ -977,6 +1038,9 @@ func (g *Game) prologue(reader *bufio.Reader) {
         "Un hater streame en direct votre chute annoncee.",
         "Montre que la scene n'appartient pas aux trolls.",
     )
+    if g.consumeMenuReturn() {
+        return
+    }
     enemy := Enemy{Name: "Hater de studio", Type: enemyHater, MaxHP: 28, HP: 28, Attack: 4, CritTimer: 3, Style: "Troll"}
     g.fightSolo(reader, enemy, battleOptions{
         Intro:       []string{"Hater: \"Pouler.fr gere maintenant la musique legitime !\""},
@@ -989,6 +1053,9 @@ func (g *Game) prologue(reader *bufio.Reader) {
         "Kaito: \"Cherche des allies, gagne des fans, prepare tes disques.\"",
         "Choisis tes destinations dans l'ordre que tu veux, sauf le Palais presidentiel qui attend une equipe complete.",
     )
+    if g.consumeMenuReturn() {
+        return
+    }
     g.StoryStage = stageArtists
     g.autoSave()
 }
@@ -1020,7 +1087,11 @@ func (g *Game) artistHub(reader *bufio.Reader) {
         }
         fmt.Println("0) Retour")
         fmt.Print("Choix: ")
-        switch read(reader) {
+        choice := read(reader)
+        if g.consumeMenuReturn() {
+            return
+        }
+        switch choice {
         case "1":
             if g.ZoneStatus[zoneMichael].Completed {
                 fmt.Println("MJ: \"Je suis deja avec toi. On garde le groove.\"")
@@ -1071,7 +1142,11 @@ func (g *Game) playRhythmChallenge(reader *bufio.Reader) bool {
         time.Sleep(350 * time.Millisecond)
     }
     fmt.Println("Inscris la sequence sans espace (ex: POPROCKPOP):")
-    input := strings.ToUpper(strings.ReplaceAll(read(reader), " ", ""))
+    raw := read(reader)
+    if activeGame != nil && activeGame.consumeMenuReturn() {
+        return false
+    }
+    input := strings.ToUpper(strings.ReplaceAll(raw, " ", ""))
     target := strings.ToUpper(strings.Join(seq, ""))
     if input == target {
         fmt.Println("MJ: \"Tu as le groove.\"")
@@ -1088,7 +1163,10 @@ func (g *Game) zoneMichael(reader *bufio.Reader) {
         "Michael Jackson glisse d'un hologramme et te fixe.",
         "MJ: \"Tu veux sauver la musique ? Montre que tu respectes le tempo.\"",
     )
-    choice := dialogueChoice(reader, "Comment repondre a MJ ?", []string{"La pop respire quand on mixe futur et nostalgie.", "Je peux t'offrir un NFT unique."})
+    choice, abort := g.dialogueChoice(reader, "Comment repondre a MJ ?", []string{"La pop respire quand on mixe futur et nostalgie.", "Je peux t'offrir un NFT unique."})
+    if abort {
+        return
+    }
     if choice == 1 {
         fmt.Println("MJ: \"La musique n'est pas un produit derive. Reviens quand tu ecoutes vraiment.\"")
         return
@@ -1107,6 +1185,9 @@ func (g *Game) zoneMichael(reader *bufio.Reader) {
         RewardXP:   35,
         RewardGold: 7,
     })
+    if g.consumeMenuReturn() {
+        return
+    }
     if !g.Characters[3].Unlocked {
         g.Characters[3].Unlocked = true
         g.Characters[3].HP = g.Characters[3].MaxHP
@@ -1127,10 +1208,15 @@ func (g *Game) zoneKaaris(reader *bufio.Reader) {
         "Kaaris attend, capuche en place, micro a la main.",
         "Kaaris: \"Ici on respecte le travail.\"",
     )
-    dialogueChoice(reader, "Comment t'approches-tu ?", []string{"Je viens apprendre de ta scene.", "Je veux vendre des goodies."})
+    if _, abort := g.dialogueChoice(reader, "Comment t'approches-tu ?", []string{"Je viens apprendre de ta scene.", "Je veux vendre des goodies."}); abort {
+        return
+    }
     block(reader,
         "Des haineux testent ta solidite avant le duel.",
     )
+    if g.consumeMenuReturn() {
+        return
+    }
     g.fightSolo(reader, Enemy{Name: "Haineux de quartier", Type: enemyCrew, MaxHP: 70, HP: 70, Attack: 7, CritTimer: 3, Style: "Rue"}, battleOptions{
         AllowBet:     true,
         Intro:        []string{"Le beat tombe a 90 BPM, les coudes aussi."},
@@ -1139,6 +1225,9 @@ func (g *Game) zoneKaaris(reader *bufio.Reader) {
         RewardGold:   6,
         RewardBetPts: 1,
     })
+    if g.consumeMenuReturn() {
+        return
+    }
     block(reader,
         "Kaaris pose le micro entre vous.",
         "Kaaris: \"Maintenant c'est moi que tu dois convaincre.\"",
@@ -1166,6 +1255,9 @@ func (g *Game) zoneKaaris(reader *bufio.Reader) {
         }
         g.ZoneStatus[zoneKaaris] = ZoneStatus{Unlocked: true, Completed: true}
         g.autoSave()
+    }
+    if g.consumeMenuReturn() {
+        return
     }
 }
 
@@ -1197,7 +1289,11 @@ func (g *Game) macronMission(reader *bufio.Reader) {
     for _, qa := range quiz {
         fmt.Println(qa.q)
         fmt.Print("Reponse: ")
-        ans := strings.ToLower(strings.ReplaceAll(read(reader), "e", "e"))
+        raw := read(reader)
+        if g.consumeMenuReturn() {
+            return
+        }
+        ans := strings.ToLower(strings.ReplaceAll(raw, "e", "e"))
         ans = strings.ReplaceAll(ans, "'", "")
         if ans != qa.a {
             fmt.Println("Macron: \"Reviens avec plus de fond.\"")
@@ -1215,6 +1311,9 @@ func (g *Game) macronMission(reader *bufio.Reader) {
         RewardXP:   55,
         RewardGold: 12,
     })
+    if g.consumeMenuReturn() {
+        return
+    }
     if !g.Characters[2].Unlocked {
         g.Characters[2].Unlocked = true
         g.Characters[2].HP = g.Characters[2].MaxHP
@@ -1243,6 +1342,9 @@ func (g *Game) labelFinal(reader *bufio.Reader) {
         "Atrium du label: neon bleu, contrats encadres, foule captive.",
         "Les quatre rivales de Miku se preparent a defendre leur monopole.",
     )
+    if g.consumeMenuReturn() {
+        return
+    }
     waveOne := []Enemy{
         {Name: "Megurine Luka", Type: enemyRival, MaxHP: 95, HP: 95, Attack: 11, CritTimer: 3, Style: "Pop aquatique"},
         {Name: "Kagamine Rin", Type: enemyRival, MaxHP: 100, HP: 100, Attack: 12, CritTimer: 3, Style: "Electro rap"},
@@ -1272,14 +1374,14 @@ func (g *Game) labelFinal(reader *bufio.Reader) {
         return
     }
     block(reader,
-        "Matthieu Berger et Sylvain Bagland applaudissent avec arrogance.",
+        "Mattieu Berger et Sylvain Bagland applaudissent avec arrogance.",
         "Ils declenchent des cages de verre autour de tes allies.",
         "Miku se retrouve seule au centre de la scene.",
     )
     solo := []*Character{g.Characters[0]}
     g.Characters[0].resetCombatFlags()
     bosses := []Enemy{
-        {Name: "Matthieu Berger", Type: enemyBoss, MaxHP: 165, HP: 165, Attack: 15, CritTimer: 3, Style: "Business"},
+        {Name: "Mattieu Berger", Type: enemyBoss, MaxHP: 165, HP: 165, Attack: 15, CritTimer: 3, Style: "Business"},
         {Name: "Sylvain Bagland", Type: enemyBoss, MaxHP: 155, HP: 155, Attack: 15, CritTimer: 2, Style: "Business"},
     }
     if !g.fightParty(reader, solo, bosses, battleOptions{
@@ -1298,6 +1400,9 @@ func (g *Game) labelFinal(reader *bufio.Reader) {
         "Miku remet la cassette dans son lecteur: le monde entier recoit a nouveau des melodies libres.",
         "La vraie musique appartient aux artistes et au public, pas aux labels.",
     )
+    if g.consumeMenuReturn() {
+        return
+    }
     g.StoryStage = stageFinish
     g.autoSave()
 }
@@ -1315,24 +1420,24 @@ func baseAttack(c *Character) int {
 }
 
 
-func (g *Game) performSpecial(c *Character, enemy *Enemy) bool {
+func (g *Game) performSpecial(reader *bufio.Reader, c *Character, enemy *Enemy, party []*Character) (bool, bool) {
     if c == nil {
-        return false
+        return false, false
     }
     switch c.Name {
     case "Hatsune Miku":
         if !c.HasNoteSpell {
             fmt.Println("Miku n'a pas encore retrouve la note explosive.")
-            return false
+            return false, false
         }
         if enemy == nil {
             fmt.Println("Aucune cible a pulveriser.")
-            return false
+            return false, false
         }
         cost := 15
         if c.Mana < cost {
             fmt.Println("Pas assez de mana pour la note explosive legendaire.")
-            return false
+            return false, false
         }
         c.Mana -= cost
         dmg := 30 + g.rng.Intn(11)
@@ -1348,71 +1453,213 @@ func (g *Game) performSpecial(c *Character, enemy *Enemy) bool {
             enemy.HP = 0
         }
         fmt.Printf("Miku declenche la note explosive legendaire (-%d HP).\n", dmg)
+        c.SpecialUsed = true
+        return true, true
     case "Kaaris":
-        if enemy == nil {
-            fmt.Println("Pas de cible pour invoquer le crew.")
-            return false
+        fmt.Println("Kaaris: \"On choisit quoi ?\"")
+        fmt.Println("1) Crew devastateur (0 MP)")
+        fmt.Println("2) Bouclier de rue (-10 MP)")
+        fmt.Println("3) Mur du crew (-18 MP)")
+        fmt.Print("Choix: ")
+        choice := read(reader)
+        if g.consumeMenuReturn() {
+            return false, false
         }
-        dmg := 34 + g.rng.Intn(13)
-        if c.BattleBoost > 0 {
-            dmg *= c.BattleBoost
+        switch choice {
+        case "1":
+            if enemy == nil {
+                fmt.Println("Pas de cible pour frapper.")
+                return false, false
+            }
+            dmg := 34 + g.rng.Intn(13)
+            if c.BattleBoost > 0 {
+                dmg *= c.BattleBoost
+            }
+            if c.IgnoreGuard {
+                dmg += 10
+                c.IgnoreGuard = false
+            }
+            enemy.HP -= dmg
+            if enemy.HP < 0 {
+                enemy.HP = 0
+            }
+            fmt.Printf("Kaaris invoque son crew (-%d HP).\n", dmg)
+            c.SpecialUsed = true
+            return true, true
+        case "2":
+            cost := 10
+            if c.Mana < cost {
+                fmt.Println("Pas assez de mana pour lever le bouclier.")
+                return false, false
+            }
+            c.Mana -= cost
+            shield := 24
+            c.ShieldHP += shield
+            fmt.Printf("Un bouclier d'acier entoure %s (+%d HP absorbables).\n", c.Name, shield)
+            c.SpecialUsed = true
+            return true, true
+        case "3":
+            cost := 18
+            if c.Mana < cost {
+                fmt.Println("Pas assez de mana pour proteger tout le monde.")
+                return false, false
+            }
+            c.Mana -= cost
+            applied := 0
+            for _, ally := range party {
+                if ally == nil || ally.HP <= 0 {
+                    continue
+                }
+                ally.ShieldHP += 18
+                applied++
+            }
+            if applied == 0 {
+                fmt.Println("Personne a proteger.")
+                return false, false
+            }
+            if applied == 1 {
+                fmt.Println("Le crew forme un bouclier autour de toi (+18 HP absorbables).")
+            } else {
+                fmt.Println("Le crew erige un mur protecteur pour l'equipe (+18 HP absorbables chacun).")
+            }
+            c.SpecialUsed = true
+            return true, true
+        default:
+            fmt.Println("Choix invalide.")
+            return false, false
         }
-        if c.IgnoreGuard {
-            dmg += 10
-            c.IgnoreGuard = false
-        }
-        enemy.HP -= dmg
-        if enemy.HP < 0 {
-            enemy.HP = 0
-        }
-        fmt.Printf("Kaaris invoque son crew (-%d HP).\n", dmg)
     case "Emmanuel Macron":
         if enemy == nil {
-            fmt.Println("Pas de cible pour le discours manipulateur.")
-            return false
+            fmt.Println("Aucune cible politique en face.")
+            return false, false
         }
-        cost := 12
-        if c.Mana < cost {
-            fmt.Println("Pas assez d'energie pour le discours manipulateur.")
-            return false
+        fmt.Println("Macron: \"Quelle tactique ?\"")
+        fmt.Println("1) Discours manipulateur (-12 MP)")
+        fmt.Println("2) Interdiction de chanter (-14 MP)")
+        fmt.Print("Choix: ")
+        choice := read(reader)
+        if g.consumeMenuReturn() {
+            return false, false
         }
-        c.Mana -= cost
-        if enemy.WeakenTurns < 2 {
-            enemy.WeakenTurns = 2
+        switch choice {
+        case "1":
+            cost := 12
+            if c.Mana < cost {
+                fmt.Println("Pas assez d'energie pour le discours manipulateur.")
+                return false, false
+            }
+            c.Mana -= cost
+            if enemy.WeakenTurns < 2 {
+                enemy.WeakenTurns = 2
+            }
+            fmt.Printf("Macron deboussole %s : ses degats sont divises pendant 2 tours.\n", enemy.Name)
+            c.SpecialUsed = true
+            return true, true
+        case "2":
+            cost := 14
+            if c.Mana < cost {
+                fmt.Println("Pas assez d'energie pour l'interdiction de chanter.")
+                return false, false
+            }
+            c.Mana -= cost
+            enemy.SilenceTurns = 1
+            fmt.Printf("%s recoit une interdiction de chanter et ne pourra pas attaquer ce tour-ci.\n", enemy.Name)
+            c.SpecialUsed = true
+            return true, false
+        default:
+            fmt.Println("Choix invalide.")
+            return false, false
         }
-        fmt.Printf("Macron deboussole %s : ses degats sont divises pendant 2 tours.\n", enemy.Name)
     case "Michael Jackson":
-        if enemy == nil {
-            fmt.Println("Le moonwalk attend un adversaire.")
-            return false
+        fmt.Println("MJ: \"Choisis ton groove.\"")
+        fmt.Println("1) Moonwalk offensif (-8 MP)")
+        fmt.Println("2) Beat therapy (-12 MP, soin perso)")
+        fmt.Println("3) Harmonie partagee (-18 MP, soigne l'equipe)")
+        fmt.Print("Choix: ")
+        choice := read(reader)
+        if g.consumeMenuReturn() {
+            return false, false
         }
-        cost := 8
-        if c.Mana < cost {
-            fmt.Println("Pas assez d'energie pour le moonwalk.")
-            return false
+        switch choice {
+        case "1":
+            if enemy == nil {
+                fmt.Println("Le moonwalk attend un adversaire.")
+                return false, false
+            }
+            cost := 8
+            if c.Mana < cost {
+                fmt.Println("Pas assez d'energie pour le moonwalk.")
+                return false, false
+            }
+            c.Mana -= cost
+            dmg := 20 + g.rng.Intn(9)
+            if c.BattleBoost > 0 {
+                dmg *= c.BattleBoost
+            }
+            if c.IgnoreGuard {
+                dmg += 6
+                c.IgnoreGuard = false
+            }
+            enemy.HP -= dmg
+            if enemy.HP < 0 {
+                enemy.HP = 0
+            }
+            c.DodgeNext = true
+            fmt.Printf("MJ glisse en moonwalk et inflige %d degats. Il esquivera le prochain coup.\n", dmg)
+            c.SpecialUsed = true
+            return true, true
+        case "2":
+            cost := 12
+            if c.Mana < cost {
+                fmt.Println("Pas assez d'energie pour ce solo.")
+                return false, false
+            }
+            c.Mana -= cost
+            heal := 32
+            c.HP += heal
+            if c.HP > c.MaxHP {
+                c.HP = c.MaxHP
+            }
+            fmt.Printf("MJ improvise un solo apaisant et se soigne (+%d HP).\n", heal)
+            c.SpecialUsed = true
+            return true, true
+        case "3":
+            cost := 18
+            if c.Mana < cost {
+                fmt.Println("Pas assez d'energie pour harmoniser l'equipe.")
+                return false, false
+            }
+            c.Mana -= cost
+            healed := 0
+            for _, ally := range party {
+                if ally == nil || ally.HP <= 0 {
+                    continue
+                }
+                gain := 20
+                ally.HP += gain
+                if ally.HP > ally.MaxHP {
+                    ally.HP = ally.MaxHP
+                }
+                healed++
+            }
+            if healed == 0 {
+                fmt.Println("Personne n'est en etat de profiter de l'harmonie.")
+                return false, false
+            }
+            fmt.Println("Le choeur de MJ guerit l'equipe (+20 HP chacun).")
+            c.SpecialUsed = true
+            return true, true
+        default:
+            fmt.Println("Choix invalide.")
+            return false, false
         }
-        c.Mana -= cost
-        dmg := 20 + g.rng.Intn(9)
-        if c.BattleBoost > 0 {
-            dmg *= c.BattleBoost
-        }
-        if c.IgnoreGuard {
-            dmg += 6
-            c.IgnoreGuard = false
-        }
-        enemy.HP -= dmg
-        if enemy.HP < 0 {
-            enemy.HP = 0
-        }
-        c.DodgeNext = true
-        fmt.Printf("MJ glisse en moonwalk et inflige %d degats. Il esquivera le prochain coup.\n", dmg)
     default:
         fmt.Println("Pas de capacite speciale propre.")
-        return false
+        return false, false
     }
-    c.SpecialUsed = true
-    return true
 }
+
+
 
 
 func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) bool {
@@ -1422,13 +1669,19 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
     if enemy.CritTimer <= 0 {
         enemy.CritTimer = 3
     }
+    enemy.SilenceTurns = 0
     for _, line := range opts.Intro {
         fmt.Println("[INFO]", line)
     }
     bet := 1
     if opts.AllowBet && player.BetPts > 0 {
         fmt.Printf("Points de mise disponibles: %d (0 aucun, 2/3/4 pour miser) -> ", player.BetPts)
-        switch read(reader) {
+        betInput := read(reader)
+        if g.consumeMenuReturn() {
+            fmt.Println("Retour au menu principal.")
+            return false
+        }
+        switch betInput {
         case "2":
             if player.BetPts >= 2 {
                 bet = 2
@@ -1450,29 +1703,37 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
     for enemy.HP > 0 && player.HP > 0 {
         showSoloHud(player, &enemy)
         fmt.Printf("Tour %d\n", turn)
+        hasNyan := player.Name == "Hatsune Miku"
         fmt.Println("1) Attaquer")
         if player.HasNoteSpell {
             fmt.Println("2) Note explosive")
         } else {
             fmt.Println("2) Note explosive (verrouille)")
         }
-        fmt.Println("3) Capacite speciale")
-        fmt.Println("4) Inventaire")
-        fmt.Println("5) Observer")
-        if opts.AllowEscape {
-            fmt.Println("6) Fuir")
+        if hasNyan {
+            fmt.Println("3) Attaque Nyan Cat")
+            fmt.Println("4) Capacite speciale")
+            fmt.Println("5) Inventaire")
+            fmt.Println("6) Observer")
+            if opts.AllowEscape {
+                fmt.Println("7) Fuir")
+            }
+        } else {
+            fmt.Println("3) Capacite speciale")
+            fmt.Println("4) Inventaire")
+            fmt.Println("5) Observer")
+            if opts.AllowEscape {
+                fmt.Println("6) Fuir")
+            }
         }
         fmt.Print("Action: ")
-        input := read(reader)
-        if input == "menu" {
-            if g.battlePause(reader) == "abort" {
-                fmt.Println("Vous quittez le combat.")
-                return false
-            }
-            continue
+        action := read(reader)
+        if g.consumeMenuReturn() {
+            fmt.Println("Retour au menu principal.")
+            return false
         }
-        consume := true
-        switch input {
+        consumeTurn := true
+        switch action {
         case "1":
             dmg := baseAttack(player) + g.rng.Intn(4)
             if player.BattleBoost > 0 {
@@ -1490,10 +1751,10 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
         case "2":
             if !player.HasNoteSpell {
                 fmt.Println("Vous n'avez pas encore appris ce sort.")
-                consume = false
+                consumeTurn = false
             } else if player.Mana < 10 {
                 fmt.Println("Pas assez de mana.")
-                consume = false
+                consumeTurn = false
             } else {
                 player.Mana -= 10
                 dmg := 18 + g.rng.Intn(6)
@@ -1511,34 +1772,116 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
                 fmt.Printf("Note explosive inflige %d degats.\n", dmg)
             }
         case "3":
-            if player.SpecialUsed {
-                fmt.Println("Capacite deja utilisee.")
-                consume = false
-            } else if !g.performSpecial(player, &enemy) {
-                consume = false
+            if hasNyan {
+                manaCost := 16
+                if player.Mana < manaCost {
+                    fmt.Println("Pas assez de mana pour invoquer Nyan Cat.")
+                    consumeTurn = false
+                } else {
+                    player.Mana -= manaCost
+                    dmg := 26 + g.rng.Intn(8)
+                    if player.BattleBoost > 0 {
+                        dmg *= player.BattleBoost
+                    }
+                    if player.IgnoreGuard {
+                        dmg += 10
+                        player.IgnoreGuard = false
+                    }
+                    enemy.HP -= dmg
+                    if enemy.HP < 0 {
+                        enemy.HP = 0
+                    }
+                    fmt.Printf("Nyan Cat dechaine son arc-en-ciel et inflige %d degats !\n", dmg)
+                }
+            } else {
+                if player.SpecialUsed {
+                    fmt.Println("Capacite deja utilisee.")
+                    consumeTurn = false
+                } else {
+                    used, consume := g.performSpecial(reader, player, &enemy, []*Character{player})
+                    if g.consumeMenuReturn() {
+                        fmt.Println("Retour au menu principal.")
+                        return false
+                    }
+                    if !used {
+                        consumeTurn = false
+                    } else if !consume {
+                        consumeTurn = false
+                    }
+                }
             }
         case "4":
-            if !g.useInventory(reader, player, &enemy, nil) {
-                consume = false
+            if hasNyan {
+                if player.SpecialUsed {
+                    fmt.Println("Capacite deja utilisee.")
+                    consumeTurn = false
+                } else {
+                    used, consume := g.performSpecial(reader, player, &enemy, []*Character{player})
+                    if g.consumeMenuReturn() {
+                        fmt.Println("Retour au menu principal.")
+                        return false
+                    }
+                    if !used {
+                        consumeTurn = false
+                    } else if !consume {
+                        consumeTurn = false
+                    }
+                }
+            } else {
+                if !g.useInventory(reader, player, &enemy, nil) {
+                    consumeTurn = false
+                }
+                if g.consumeMenuReturn() {
+                    fmt.Println("Retour au menu principal.")
+                    return false
+                }
             }
         case "5":
-            fmt.Printf("%s (%s) HP %d/%d | ATK %d\n", enemy.Name, enemy.Style, enemy.HP, enemy.MaxHP, enemy.Attack)
-            consume = false
+            if hasNyan {
+                if !g.useInventory(reader, player, &enemy, nil) {
+                    consumeTurn = false
+                }
+                if g.consumeMenuReturn() {
+                    fmt.Println("Retour au menu principal.")
+                    return false
+                }
+            } else {
+                fmt.Printf("%s (%s) HP %d/%d | ATK %d\n", enemy.Name, enemy.Style, enemy.HP, enemy.MaxHP, enemy.Attack)
+                consumeTurn = false
+            }
         case "6":
-            if opts.AllowEscape {
+            if hasNyan {
+                fmt.Printf("%s (%s) HP %d/%d | ATK %d\n", enemy.Name, enemy.Style, enemy.HP, enemy.MaxHP, enemy.Attack)
+                consumeTurn = false
+            } else if opts.AllowEscape {
                 fmt.Println("Vous battez en retraite.")
                 return false
+            } else {
+                fmt.Println("Impossible de fuir.")
+                consumeTurn = false
             }
-            fmt.Println("Impossible de fuir.")
-            consume = false
+        case "7":
+            if hasNyan {
+                if opts.AllowEscape {
+                    fmt.Println("Vous battez en retraite.")
+                    return false
+                }
+                fmt.Println("Impossible de fuir.")
+                consumeTurn = false
+            } else {
+                fmt.Println("Action inconnue.")
+                consumeTurn = false
+            }
         default:
             fmt.Println("Action inconnue.")
-            consume = false
+            consumeTurn = false
         }
+
         if enemy.HP <= 0 {
             break
         }
-        if consume {
+
+        if consumeTurn {
             if enemy.PoisonTurns > 0 {
                 enemy.HP -= enemy.PoisonDmg
                 if enemy.HP < 0 {
@@ -1549,6 +1892,15 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
                 if enemy.HP <= 0 {
                     break
                 }
+            }
+            if enemy.SilenceTurns > 0 {
+                fmt.Printf("%s est reduit au silence et ne peut pas attaquer.\n", enemy.Name)
+                enemy.SilenceTurns--
+                if enemy.CritTimer > 1 {
+                    enemy.CritTimer--
+                }
+                turn++
+                continue
             }
             dmg := enemy.Attack
             if enemy.WeakenTurns > 0 {
@@ -1569,11 +1921,14 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
                 fmt.Printf("%s esquive le coup !\n", player.Name)
                 player.DodgeNext = false
             } else {
-                player.HP -= dmg
-                if player.HP < 0 {
-                    player.HP = 0
+                dmg = absorbShieldDamage(player, dmg)
+                if dmg > 0 {
+                    player.HP -= dmg
+                    if player.HP < 0 {
+                        player.HP = 0
+                    }
+                    fmt.Printf("%s subit %d degats.\n", player.Name, dmg)
                 }
-                fmt.Printf("%s subit %d degats.\n", player.Name, dmg)
             }
         }
         turn++
@@ -1618,6 +1973,8 @@ func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) 
     return false
 }
 
+
+
 func allEnemiesDown(enemies []Enemy) bool {
     for _, e := range enemies {
         if e.HP > 0 {
@@ -1659,6 +2016,7 @@ func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []En
         if enemies[i].CritTimer <= 0 {
             enemies[i].CritTimer = 3
         }
+        enemies[i].SilenceTurns = 0
     }
     for _, line := range opts.Intro {
         fmt.Println("[INFO]", line)
@@ -1699,102 +2057,252 @@ func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []En
             if ch.HP <= 0 {
                 continue
             }
-            fmt.Printf("\n%s (HP %d/%d | MP %d/%d)\n", ch.Name, ch.HP, ch.MaxHP, ch.Mana, ch.MaxMana)
-            fmt.Println("1) Attaquer")
-            if ch.HasNoteSpell {
-                fmt.Println("2) Note explosive")
-            } else {
-                fmt.Println("2) Note explosive (verrouille)")
-            }
-            fmt.Println("3) Capacite speciale")
-            fmt.Println("4) Inventaire")
-            fmt.Println("5) Observer")
-            fmt.Print("Action: ")
-            input := read(reader)
-            if input == "menu" {
-                if g.battlePause(reader) == "abort" {
-                    fmt.Println("Retraite generale.")
+            for {
+                fmt.Printf("\n%s (HP %d/%d | MP %d/%d", ch.Name, ch.HP, ch.MaxHP, ch.Mana, ch.MaxMana)
+                if ch.ShieldHP > 0 {
+                    fmt.Printf(" | Bouclier %d", ch.ShieldHP)
+                }
+                fmt.Println(")")
+                hasNyan := ch.Name == "Hatsune Miku"
+                fmt.Println("1) Attaquer")
+                if ch.HasNoteSpell {
+                    fmt.Println("2) Note explosive")
+                } else {
+                    fmt.Println("2) Note explosive (verrouille)")
+                }
+                if hasNyan {
+                    fmt.Println("3) Attaque Nyan Cat")
+                    fmt.Println("4) Capacite speciale")
+                    fmt.Println("5) Inventaire")
+                    fmt.Println("6) Observer")
+                    if opts.AllowEscape {
+                        fmt.Println("7) Fuir")
+                    }
+                } else {
+                    fmt.Println("3) Capacite speciale")
+                    fmt.Println("4) Inventaire")
+                    fmt.Println("5) Observer")
+                    if opts.AllowEscape {
+                        fmt.Println("6) Fuir")
+                    }
+                }
+                fmt.Print("Action: ")
+                action := read(reader)
+                if g.consumeMenuReturn() {
+                    fmt.Println("Retour au menu principal.")
                     return false
                 }
-                input = ""
-            }
-            consume := true
-            switch input {
-            case "1":
-                target := selectEnemy(reader, enemies)
-                if target == nil {
-                    consume = false
-                    break
-                }
-                dmg := baseAttack(ch) + g.rng.Intn(5)
-                if ch.BattleBoost > 0 {
-                    dmg *= ch.BattleBoost
-                }
-                if ch.IgnoreGuard {
-                    dmg += 6
-                    ch.IgnoreGuard = false
-                }
-                target.HP -= dmg
-                if target.HP < 0 {
-                    target.HP = 0
-                }
-                fmt.Printf("%s frappe %s pour %d degats.\n", ch.Name, target.Name, dmg)
-            case "2":
-                if !ch.HasNoteSpell || ch.Mana < 10 {
-                    fmt.Println("Sort indisponible.")
-                    consume = false
-                } else {
-                    ch.Mana -= 10
-                    target := selectEnemy(reader, enemies)
+                consumeTurn := true
+                handled := true
+
+                switch action {
+                case "1":
+                    target, abort := selectEnemy(reader, enemies)
+                    if abort {
+                        fmt.Println("Retour au menu principal.")
+                        return false
+                    }
                     if target == nil {
-                        ch.Mana += 10
-                        consume = false
-                        break
+                        handled = false
+                        consumeTurn = false
+                    } else {
+                        dmg := baseAttack(ch) + g.rng.Intn(5)
+                        if ch.BattleBoost > 0 {
+                            dmg *= ch.BattleBoost
+                        }
+                        if ch.IgnoreGuard {
+                            dmg += 6
+                            ch.IgnoreGuard = false
+                        }
+                        target.HP -= dmg
+                        if target.HP < 0 {
+                            target.HP = 0
+                        }
+                        fmt.Printf("%s frappe %s pour %d degats.\n", ch.Name, target.Name, dmg)
                     }
-                    dmg := 18 + g.rng.Intn(7)
-                    if ch.BattleBoost > 0 {
-                        dmg *= ch.BattleBoost
+                case "2":
+                    if !ch.HasNoteSpell || ch.Mana < 10 {
+                        fmt.Println("Sort indisponible.")
+                        handled = false
+                        consumeTurn = false
+                    } else {
+                        target, abort := selectEnemy(reader, enemies)
+                        if abort {
+                            fmt.Println("Retour au menu principal.")
+                            return false
+                        }
+                        if target == nil {
+                            handled = false
+                            consumeTurn = false
+                        } else {
+                            ch.Mana -= 10
+                            dmg := 18 + g.rng.Intn(7)
+                            if ch.BattleBoost > 0 {
+                                dmg *= ch.BattleBoost
+                            }
+                            if ch.IgnoreGuard {
+                                dmg += 8
+                                ch.IgnoreGuard = false
+                            }
+                            target.HP -= dmg
+                            if target.HP < 0 {
+                                target.HP = 0
+                            }
+                            fmt.Printf("Note explosive touche %s pour %d degats.\n", target.Name, dmg)
+                        }
                     }
-                    if ch.IgnoreGuard {
-                        dmg += 8
-                        ch.IgnoreGuard = false
+                case "3":
+                    if hasNyan {
+                        if ch.Mana < 16 {
+                            fmt.Println("Pas assez de mana pour invoquer Nyan Cat.")
+                            handled = false
+                            consumeTurn = false
+                        } else {
+                            target, abort := selectEnemy(reader, enemies)
+                            if abort {
+                                fmt.Println("Retour au menu principal.")
+                                return false
+                            }
+                            if target == nil {
+                                handled = false
+                                consumeTurn = false
+                            } else {
+                                ch.Mana -= 16
+                                dmg := 26 + g.rng.Intn(8)
+                                if ch.BattleBoost > 0 {
+                                    dmg *= ch.BattleBoost
+                                }
+                                if ch.IgnoreGuard {
+                                    dmg += 10
+                                    ch.IgnoreGuard = false
+                                }
+                                target.HP -= dmg
+                                if target.HP < 0 {
+                                    target.HP = 0
+                                }
+                                fmt.Printf("Nyan Cat dechire la scene et inflige %d degats a %s !\n", dmg, target.Name)
+                            }
+                        }
+                    } else {
+                        if ch.SpecialUsed {
+                            fmt.Println("Capacite deja utilisee.")
+                            handled = false
+                            consumeTurn = false
+                        } else {
+                            idx := firstAliveEnemy(enemies)
+                            if idx == -1 {
+                                handled = false
+                                consumeTurn = false
+                            } else {
+                                used, consume := g.performSpecial(reader, ch, &enemies[idx], party)
+                                if g.consumeMenuReturn() {
+                                    fmt.Println("Retour au menu principal.")
+                                    return false
+                                }
+                                if !used {
+                                    handled = false
+                                    consumeTurn = false
+                                } else if !consume {
+                                    consumeTurn = false
+                                }
+                            }
+                        }
                     }
-                    target.HP -= dmg
-                    if target.HP < 0 {
-                        target.HP = 0
+                case "4":
+                    if hasNyan {
+                        if ch.SpecialUsed {
+                            fmt.Println("Capacite deja utilisee.")
+                            handled = false
+                            consumeTurn = false
+                        } else {
+                            idx := firstAliveEnemy(enemies)
+                            if idx == -1 {
+                                handled = false
+                                consumeTurn = false
+                            } else {
+                                used, consume := g.performSpecial(reader, ch, &enemies[idx], party)
+                                if g.consumeMenuReturn() {
+                                    fmt.Println("Retour au menu principal.")
+                                    return false
+                                }
+                                if !used {
+                                    handled = false
+                                    consumeTurn = false
+                                } else if !consume {
+                                    consumeTurn = false
+                                }
+                            }
+                        }
+                    } else {
+                        if !g.useInventory(reader, ch, nil, enemies) {
+                            handled = false
+                            consumeTurn = false
+                        }
+                        if g.consumeMenuReturn() {
+                            fmt.Println("Retour au menu principal.")
+                            return false
+                        }
                     }
-                    fmt.Printf("Note explosive touche %s pour %d degats.\n", target.Name, dmg)
+                case "5":
+                    if hasNyan {
+                        if !g.useInventory(reader, ch, nil, enemies) {
+                            handled = false
+                            consumeTurn = false
+                        }
+                        if g.consumeMenuReturn() {
+                            fmt.Println("Retour au menu principal.")
+                            return false
+                        }
+                    } else {
+                        printEnemies(enemies)
+                        consumeTurn = false
+                    }
+                case "6":
+                    if hasNyan {
+                        printEnemies(enemies)
+                        consumeTurn = false
+                    } else if opts.AllowEscape {
+                        fmt.Println("Vous battez en retraite.")
+                        return false
+                    } else {
+                        fmt.Println("Impossible de fuir.")
+                        handled = false
+                        consumeTurn = false
+                    }
+                case "7":
+                    if hasNyan {
+                        if opts.AllowEscape {
+                            fmt.Println("Vous battez en retraite.")
+                            return false
+                        }
+                        fmt.Println("Impossible de fuir.")
+                        handled = false
+                        consumeTurn = false
+                    } else {
+                        fmt.Println("Action inconnue.")
+                        handled = false
+                        consumeTurn = false
+                    }
+                default:
+                    fmt.Println("Action inconnue.")
+                    handled = false
+                    consumeTurn = false
                 }
-            case "3":
-                idx := firstAliveEnemy(enemies)
-                if idx == -1 {
-                    consume = false
-                    break
+
+                if !handled {
+                    continue
                 }
-                if ch.SpecialUsed {
-                    fmt.Println("Capacite deja utilisee.")
-                    consume = false
-                } else if !g.performSpecial(ch, &enemies[idx]) {
-                    consume = false
+                if !consumeTurn {
+                    continue
                 }
-            case "4":
-                if !g.useInventory(reader, ch, nil, enemies) {
-                    consume = false
-                }
-            case "5":
-                printEnemies(enemies)
-                consume = false
-            default:
-                fmt.Println("Action inconnue.")
-                consume = false
-            }
-            if consume {
-                continue
+                break
             }
         }
+
         if allEnemiesDown(enemies) {
             continue
         }
+
         for i := range enemies {
             enemy := &enemies[i]
             if enemy.HP <= 0 {
@@ -1810,6 +2318,14 @@ func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []En
                 if enemy.HP <= 0 {
                     continue
                 }
+            }
+            if enemy.SilenceTurns > 0 {
+                fmt.Printf("%s est reduit au silence et ne peut pas attaquer.\n", enemy.Name)
+                enemy.SilenceTurns--
+                if enemy.CritTimer > 1 {
+                    enemy.CritTimer--
+                }
+                continue
             }
             target := targetAlive(g.rng, party)
             if target == nil {
@@ -1835,6 +2351,10 @@ func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []En
                 target.DodgeNext = false
                 continue
             }
+            dmg = absorbShieldDamage(target, dmg)
+            if dmg <= 0 {
+                continue
+            }
             target.HP -= dmg
             if target.HP < 0 {
                 target.HP = 0
@@ -1845,6 +2365,7 @@ func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []En
     }
 }
 
+
 func firstAliveEnemy(enemies []Enemy) int {
     for i, e := range enemies {
         if e.HP > 0 {
@@ -1854,18 +2375,27 @@ func firstAliveEnemy(enemies []Enemy) int {
     return -1
 }
 
-func selectEnemy(reader *bufio.Reader, enemies []Enemy) *Enemy {
-    fmt.Print("Cible (numero): ")
-    idx, err := strconv.Atoi(read(reader))
-    if err != nil || idx <= 0 || idx > len(enemies) {
-        fmt.Println("Cible invalide.")
-        return nil
+func selectEnemy(reader *bufio.Reader, enemies []Enemy) (*Enemy, bool) {
+    if len(enemies) == 0 {
+        return nil, false
     }
-    if enemies[idx-1].HP <= 0 {
-        fmt.Println("Cette cible est deja a terre.")
-        return nil
+    for {
+        fmt.Print("Cible (numero): ")
+        input := read(reader)
+        if activeGame != nil && activeGame.consumeMenuReturn() {
+            return nil, true
+        }
+        idx, err := strconv.Atoi(input)
+        if err != nil || idx <= 0 || idx > len(enemies) {
+            fmt.Println("Cible invalide.")
+            continue
+        }
+        if enemies[idx-1].HP <= 0 {
+            fmt.Println("Cette cible est deja a terre.")
+            continue
+        }
+        return &enemies[idx-1], false
     }
-    return &enemies[idx-1]
 }
 
 func (g *Game) party() []*Character {
@@ -2006,6 +2536,9 @@ func (g *Game) chooseCharacter(reader *bufio.Reader) {
     }
     fmt.Print("Choix (0 annuler): ")
     choice, err := strconv.Atoi(read(reader))
+    if g.consumeMenuReturn() {
+        return
+    }
     if err != nil || choice <= 0 || choice > len(g.Characters) {
         fmt.Println("Aucun changement.")
         return
@@ -2034,6 +2567,10 @@ func (g *Game) runNextStory(reader *bufio.Reader) {
 }
 
 func (g *Game) run(reader *bufio.Reader) {
+    setActiveGame(g)
+    defer setActiveGame(nil)
+    g.menuReturnRequested = false
+
     if g.StoryStage == stagePrologue {
         g.prologue(reader)
     }
@@ -2055,7 +2592,11 @@ func (g *Game) run(reader *bufio.Reader) {
         fmt.Println("8) Sauvegarder")
         fmt.Println("9) Quitter")
         fmt.Print("Choix: ")
-        switch read(reader) {
+        choice := read(reader)
+        if g.consumeMenuReturn() {
+            continue
+        }
+        switch choice {
         case "1":
             g.runNextStory(reader)
         case "2":
@@ -2081,6 +2622,8 @@ func (g *Game) run(reader *bufio.Reader) {
         }
     }
 }
+
+
 
 func main() {
     reader := bufio.NewReader(os.Stdin)
