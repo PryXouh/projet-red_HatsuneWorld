@@ -1,0 +1,107 @@
+{
+  "ProfileName": "Elias",
+  "PlayerIndex": 0,
+  "Characters": [
+    {
+      "Name": "Hatsune Miku",
+      "Class": "Digital Idol",
+      "MaxHP": 80,
+      "HP": 30,
+      "MaxMana": 40,
+      "Mana": 40,
+      "Level": 1,
+      "XP": 55,
+      "BetPts": 30,
+      "Inventory": [
+        "equip_glove"
+      ],
+      "InventoryMax": 12,
+      "Unlocked": true,
+      "HasNoteSpell": false,
+      "SpecialUsed": false,
+      "BattleBoost": 0,
+      "IgnoreGuard": false,
+      "DodgeNext": false
+    },
+    {
+      "Name": "Kaaris",
+      "Class": "Force de la Rue",
+      "MaxHP": 120,
+      "HP": 120,
+      "MaxMana": 30,
+      "Mana": 30,
+      "Level": 1,
+      "XP": 0,
+      "BetPts": 0,
+      "Inventory": null,
+      "InventoryMax": 12,
+      "Unlocked": false,
+      "HasNoteSpell": false,
+      "SpecialUsed": false,
+      "BattleBoost": 0,
+      "IgnoreGuard": false,
+      "DodgeNext": false
+    },
+    {
+      "Name": "Emmanuel Macron",
+      "Class": "Strategie Presidentielle",
+      "MaxHP": 100,
+      "HP": 100,
+      "MaxMana": 35,
+      "Mana": 35,
+      "Level": 1,
+      "XP": 0,
+      "BetPts": 0,
+      "Inventory": null,
+      "InventoryMax": 12,
+      "Unlocked": false,
+      "HasNoteSpell": false,
+      "SpecialUsed": false,
+      "BattleBoost": 0,
+      "IgnoreGuard": false,
+      "DodgeNext": false
+    },
+    {
+      "Name": "Michael Jackson",
+      "Class": "Roi de la Pop",
+      "MaxHP": 100,
+      "HP": 100,
+      "MaxMana": 35,
+      "Mana": 35,
+      "Level": 1,
+      "XP": 0,
+      "BetPts": 0,
+      "Inventory": null,
+      "InventoryMax": 12,
+      "Unlocked": true,
+      "HasNoteSpell": false,
+      "SpecialUsed": false,
+      "BattleBoost": 0,
+      "IgnoreGuard": false,
+      "DodgeNext": false
+    }
+  ],
+  "StoryStage": 2,
+  "TrainingLevel": 0,
+  "TrainingBaseHP": 24,
+  "TrainingBaseAtk": 5,
+  "FarmLevel": 0,
+  "CraftUnlocked": false,
+  "Gold": 28,
+  "Flags": {},
+  "ZoneStatus": {
+    "zone_kaaris": {
+      "Unlocked": true,
+      "Completed": false
+    },
+    "zone_macron": {
+      "Unlocked": false,
+      "Completed": false
+    },
+    "zone_michael": {
+      "Unlocked": true,
+      "Completed": true
+    }
+  },
+  "Timestamp": "2025-09-18T10:00:33.9434718+02:00"
+}

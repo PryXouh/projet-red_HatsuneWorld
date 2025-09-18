@@ -1,1065 +1,2105 @@
+
 package main
-
-/*
-   Ce programme implémente un jeu d'aventure textuel complet basé sur
-   la Bible d'univers « Hatsune Miku et la Cassette Légendaire »【936002994787532†L36-L49】.
-
-   L'objectif est de rester accessible pour des débutants (niveau Bachelor 1),
-   sans librairies externes ni constructions Go avancées, tout en suivant
-   l'histoire : la cassette légendaire a été volée par le label Pouler.fr,
-   Miku doit parcourir plusieurs chapitres, rencontrer des artistes clés,
-   affronter des ennemis (haters, sbires, rivales) et finalement battre
-   les dirigeants du label pour restituer la vraie musique.
-
-   Les mécaniques principales incluses :
-   - Système de personnages jouables (Miku, Kaaris, Macron, Michael Jackson)
-     avec PV et capacités spéciales conformes à la bible【936002994787532†L53-L79】.
-   - Inventaire limité et système d'objets (potions, matériaux, livres de sort,
-     équipements)【936002994787532†L100-L112】.
-   - Marchand (disquaire) pour acheter objets et matériaux【936002994787532†L116-L127】.
-   - Forgeron (ingénieur son) pour combiner matériaux et fabriquer des
-     équipements ou disques empoisonnés【936002994787532†L132-L162】.
-   - Recettes de craft (chapeau, tunique, bottes de scène) et disques
-     empoisonnés avec effets spécifiques【936002994787532†L138-L160】.
-   - Système de mise en combat : le joueur mise des points (x2/x3/x4),
-     influençant la difficulté et les récompenses【936002994787532†L270-L277】.
-   - Combat au tour par tour avec attaque de base, sort magique (Note
-     explosive) et possibilité d'utiliser l'inventaire.
-   - Progression en chapitres suivant la structure de la bible【936002994787532†L306-L313】 :
-       1) Perte de la Cassette (prologue + tutoriel)
-       2) Les Haters du Label (combats d’entraînement)
-       3) Les Artistes Clés (rencontres MJ, Kaaris, Macron)
-       4) Les Rivales (4 boss stylisés)
-       5) Le Label Pouler.fr (combat final)
-
-   Ce fichier est autonome : compilez avec `go build hatsune_game.go` et
-   exécutez pour jouer. Les commentaires expliquent chaque étape pour
-   faciliter la compréhension et la modification.
-*/
 
 import (
     "bufio"
+    "encoding/json"
+    "errors"
     "fmt"
+    "io/fs"
+    "math"
     "math/rand"
     "os"
+    "path/filepath"
+    "sort"
+    "strconv"
     "strings"
     "time"
 )
 
-// -----------------------------------------------------------------------------
-// Structures de données principales
-
-// ItemType énumère les catégories d'objets possibles dans le jeu.
-type ItemType int
-
 const (
-    Consumable ItemType = iota // consommable (potion)
-    Equipment                 // équipement (bonus de PV)
-    Special                   // objet spécial (livres, clés...)
-    Material                  // matériau pour le craft
+    saveDirName = "saves"
+
+    stagePrologue = iota
+    stageArtists
+    stageMacron
+    stageLabel
+    stageFinish
+
+    zoneMichael = "zone_michael"
+    zoneKaaris  = "zone_kaaris"
+    zoneMacron  = "zone_macron"
 )
 
-// Item représente un objet que le joueur peut acheter, utiliser ou porter.
-type Item struct {
-    Name        string    // nom de l'objet
-    Type        ItemType  // type d'objet
-    Description string    // description courte
-    Price       int       // prix chez le marchand (0 si non achetable)
-    Effect      func(p *Character) bool // fonction appelée lors de l'utilisation; retourne vrai si consommé
+type ItemType string
+
+type EnemyType string
+
+const (
+    itemConsumable ItemType = "consumable"
+    itemEquipment  ItemType = "equipment"
+    itemSpecial    ItemType = "special"
+    itemMaterial   ItemType = "material"
+    itemBoost      ItemType = "boost"
+)
+
+const (
+    enemyHater EnemyType = "hater"
+    enemyCrew  EnemyType = "crew"
+    enemyRival EnemyType = "rival"
+    enemyBoss  EnemyType = "boss"
+    enemyFarm  EnemyType = "farm"
+)
+
+type ItemDefinition struct {
+    ID           string
+    Name         string
+    Description  string
+    Type         ItemType
+    Price        int
+    EffectID     string
+    BetPointCost int
 }
 
-// Recipe définit une recette de craft : matériaux nécessaires et objet résultant.
-type Recipe struct {
-    Name   string   // nom de la recette/objet créé
-    Inputs []string // liste de noms de matériaux requis
-    Output Item     // objet créé
+type RecipeDefinition struct {
+    ID        string
+    Name      string
+    Inputs    []string
+    OutputID  string
+    CraftCost int
 }
 
-// Character modélise un personnage jouable (ou PNJ combattant) avec ses
-// caractéristiques de base. Certaines capacités spéciales sont débloquées
-// via l'histoire.
 type Character struct {
-    Name          string   // nom du personnage
-    Class         string   // classe (Digital Idol, Force de la Rue, etc.)
-    MaxHP         int      // points de vie maximum
-    HP            int      // points de vie actuels
-    MaxMana       int      // mana maximum
-    Mana          int      // mana actuel
-    Level         int      // niveau (augmente les stats)
-    XP            int      // expérience accumulée
-    Gold          int      // or disponible
-    BetPts        int      // points de mise (utilisés pour parier avant un combat)
-    Inventory     []Item   // inventaire du joueur (objets et matériaux)
-    InventoryMax  int      // nombre maximum d'objets transportables
-    Unlocked      bool     // indique si le personnage est disponible pour jouer
-    HasNoteSpell  bool     // indique si le sort « Note explosive » est appris
-    SpecialUsed   bool     // réinitialisé à chaque combat : vrai si capacité spéciale déjà utilisée
+    Name         string
+    Class        string
+    MaxHP        int
+    HP           int
+    MaxMana      int
+    Mana         int
+    Level        int
+    XP           int
+    BetPts       int
+    Inventory    []string
+    InventoryMax int
+    Unlocked     bool
+    HasNoteSpell bool
+    SpecialUsed  bool
+
+    BattleBoost int
+    IgnoreGuard bool
+    DodgeNext   bool
 }
 
-// Enemy représente un adversaire en combat. Les bosses et sbires sont
-// également modélisés par cette structure simple.
 type Enemy struct {
-    Name     string // nom de l'ennemi
-    HP       int    // points de vie actuels
-    MaxHP    int    // points de vie maximum
-    Attack   int    // dégâts de base infligés à chaque tour
-    CritTimer int   // compteur de tours pour déclencher un coup critique
-    Style    string // pour information (pop, rap, rock, classique)
+    Name      string
+    Type      EnemyType
+    MaxHP     int
+    HP        int
+    Attack    int
+    CritTimer int
+    Style     string
+
+    PoisonTurns int
+    PoisonDmg   int
+    WeakenTurns int
 }
 
-// Game centralise l'état du jeu : personnages disponibles, joueur courant,
-// inventaire, recettes, marchand, etc.
+type battleOptions struct {
+    AllowBet     bool
+    AllowEscape  bool
+    Intro        []string
+    Victory      []string
+    Defeat       []string
+    RewardXP     int
+    RewardGold   int
+    RewardBetPts int
+    IsBoss       bool
+}
+
+type ZoneStatus struct {
+    Unlocked  bool
+    Completed bool
+}
+
+func zoneLabel(z ZoneStatus) string {
+    switch {
+    case z.Completed:
+        return "termine"
+    case z.Unlocked:
+        return "accessible"
+    default:
+        return "verrouille"
+    }
+}
+
+type SaveState struct {
+    ProfileName     string
+    PlayerIndex     int
+    Characters      []Character
+    StoryStage      int
+    TrainingLevel   int
+    TrainingBaseHP  int
+    TrainingBaseAtk int
+    FarmLevel       int
+    CraftUnlocked   bool
+    Gold            int
+    Flags           map[string]bool
+    ZoneStatus      map[string]ZoneStatus
+    Timestamp       time.Time
+}
+
+type SaveManager struct {
+    base string
+}
+
+func newSaveManager(base string) *SaveManager {
+    if base == "" {
+        base = saveDirName
+    }
+    return &SaveManager{base: base}
+}
+
+func (sm *SaveManager) dir() string {
+    if sm == nil || sm.base == "" {
+        return saveDirName
+    }
+    return sm.base
+}
+
+func sanitizeProfileName(name string) string {
+    name = strings.TrimSpace(name)
+    if name == "" {
+        return "profil"
+    }
+    var b strings.Builder
+    for _, r := range name {
+        switch {
+        case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+            b.WriteRune(r)
+        case r >= 'A' && r <= 'Z':
+            b.WriteRune(r + ('a' - 'A'))
+        default:
+            b.WriteRune('_')
+        }
+    }
+    out := strings.Trim(b.String(), "_")
+    if out == "" {
+        out = fmt.Sprintf("profil_%d", time.Now().Unix())
+    }
+    return out
+}
+
+func (sm *SaveManager) filePath(name string) string {
+    safe := sanitizeProfileName(name)
+    return filepath.Join(sm.dir(), safe+".json")
+}
+
+func (sm *SaveManager) ensureDir() error {
+    return os.MkdirAll(sm.dir(), 0o755)
+}
+
+func (sm *SaveManager) save(state SaveState) error {
+    if err := sm.ensureDir(); err != nil {
+        return err
+    }
+    state.Timestamp = time.Now()
+    path := sm.filePath(state.ProfileName)
+    file, err := os.Create(path)
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+    enc := json.NewEncoder(file)
+    enc.SetIndent("", "  ")
+    return enc.Encode(state)
+}
+
+func (sm *SaveManager) load(name string) (*SaveState, error) {
+    if err := sm.ensureDir(); err != nil {
+        return nil, err
+    }
+    path := sm.filePath(name)
+    file, err := os.Open(path)
+    if err != nil {
+        return nil, err
+    }
+    defer file.Close()
+    var state SaveState
+    if err := json.NewDecoder(file).Decode(&state); err != nil {
+        return nil, err
+    }
+    if state.ProfileName == "" {
+        state.ProfileName = name
+    }
+    return &state, nil
+}
+
+func (sm *SaveManager) list() ([]string, error) {
+    if err := sm.ensureDir(); err != nil {
+        return nil, err
+    }
+    entries, err := os.ReadDir(sm.dir())
+    if err != nil {
+        if errors.Is(err, fs.ErrNotExist) {
+            return []string{}, nil
+        }
+        return nil, err
+    }
+    names := make([]string, 0, len(entries))
+    for _, entry := range entries {
+        if entry.IsDir() {
+            continue
+        }
+        if filepath.Ext(entry.Name()) != ".json" {
+            continue
+        }
+        path := filepath.Join(sm.dir(), entry.Name())
+        file, err := os.Open(path)
+        if err != nil {
+            continue
+        }
+        var state SaveState
+        if err := json.NewDecoder(file).Decode(&state); err == nil {
+            display := state.ProfileName
+            if display == "" {
+                display = strings.TrimSuffix(entry.Name(), ".json")
+            }
+            names = append(names, display)
+        }
+        file.Close()
+    }
+    sort.Strings(names)
+    return names, nil
+}
+
 type Game struct {
-    Player      *Character   // pointeur vers le personnage actuellement contrôlé
-    Characters  []*Character // liste de tous les personnages jouables
-    Merchant    []Item       // objets vendus chez le disquaire
-    Materials   []Item       // matériaux vendus chez le marchand
-    Recipes     []Recipe     // recettes de craft disponibles chez le forgeron
-    rng         *rand.Rand   // générateur pseudo‑aléatoire
-    StoryStage  int          // progression dans l'histoire (0 à 5)
+    PlayerIndex     int
+    Characters      []*Character
+    StoryStage      int
+    TrainingLevel   int
+    TrainingBaseHP  int
+    TrainingBaseAtk int
+    FarmLevel       int
+    CraftUnlocked   bool
+    Gold            int
+    Flags           map[string]bool
+    ZoneStatus      map[string]ZoneStatus
+    rng             *rand.Rand
+    saver           *SaveManager
+    profile         string
 
-    // Variables de progression pour les combats d'entraînement
-    // Ces valeurs permettent de rendre la difficulté progressive et d'appliquer
-    // un bonus au joueur à chaque victoire : la base PV des ennemis augmente
-    // légèrement tandis que le joueur gagne des PV permanents.
-    TrainingEnemyBaseHP    int
-    TrainingEnemyBaseAttack int
+    merchantItems []string
+    materialItems []string
+    boostItems    []string
+    recipes       []RecipeDefinition
 }
 
-// -----------------------------------------------------------------------------
-// Initialisation du jeu
+const (
+    effHeal        = "heal"
+    effMana        = "mana"
+    effPoison      = "poison"
+    effNote        = "note"
+    effBag         = "bag"
+    effHat         = "hat"
+    effBoot        = "boot"
+    effTunic       = "tunic"
+    effGlove       = "glove"
+    effDiscHater   = "disc_hater"
+    effDiscCrew    = "disc_crew"
+    effDiscBoss    = "disc_boss"
+    effDiscPoison  = "disc_poison"
+    effBoostX2     = "boost_x2"
+    effBoostX4     = "boost_x4"
+    effPass        = "pass"
+    effCrew        = "crew"
+)
 
-// NewGame crée une nouvelle partie en initialisant les personnages,
-// marchandises, recettes et paramètres de base.
-func NewGame() *Game {
-    g := &Game{rng: rand.New(rand.NewSource(time.Now().UnixNano()))}
-    // Création des personnages (seul Miku est débloqué au départ)
-    miku := &Character{Name: "Hatsune Miku", Class: "Digital Idol", MaxHP: 80, HP: 80, MaxMana: 40, Mana: 40, Level: 1, XP: 0, Gold: 10, BetPts: 30, InventoryMax: 10, Unlocked: true, HasNoteSpell: false}
-    kaaris := &Character{Name: "Kaaris", Class: "Force de la Rue", MaxHP: 120, HP: 120, MaxMana: 30, Mana: 30, Level: 1, XP: 0, Gold: 0, BetPts: 0, InventoryMax: 10, Unlocked: false}
-    macron := &Character{Name: "Macron", Class: "Stratège Présidentiel", MaxHP: 100, HP: 100, MaxMana: 35, Mana: 35, Level: 1, XP: 0, Gold: 0, BetPts: 0, InventoryMax: 10, Unlocked: false}
-    mj := &Character{Name: "Michael Jackson", Class: "Roi de la Pop", MaxHP: 100, HP: 100, MaxMana: 35, Mana: 35, Level: 1, XP: 0, Gold: 0, BetPts: 0, InventoryMax: 10, Unlocked: false}
-    g.Characters = []*Character{miku, kaaris, macron, mj}
-    g.Player = miku
-    g.StoryStage = 0
+var items = map[string]ItemDefinition{
+    "potion_hp":     {ID: "potion_hp", Name: "Potion de vie", Description: "Rend 50 HP", Type: itemConsumable, Price: 3, EffectID: effHeal},
+    "potion_mana":   {ID: "potion_mana", Name: "Potion d'energie", Description: "Rend 20 MP", Type: itemConsumable, Price: 5, EffectID: effMana},
+    "potion_poison": {ID: "potion_poison", Name: "Potion contaminee", Description: "Necessaire pour fabriquer des disques toxiques", Type: itemConsumable, Price: 6, EffectID: effPoison},
+    "grimoire_note": {ID: "grimoire_note", Name: "Livre Note explosive", Description: "Apprend la note explosive", Type: itemSpecial, Price: 25, EffectID: effNote},
+    "bag_upgrade":   {ID: "bag_upgrade", Name: "Extension sacoche", Description: "Ajoute 10 emplacements (max 3)", Type: itemSpecial, Price: 30, EffectID: effBag},
+    "mat_loup":      {ID: "mat_loup", Name: "Sample de Loup", Description: "Sample brut", Type: itemMaterial, Price: 4},
+    "mat_troll":     {ID: "mat_troll", Name: "Partition de Troll", Description: "Partition dechiree", Type: itemMaterial, Price: 7},
+    "mat_sanglier":  {ID: "mat_sanglier", Name: "Cable de Sanglier", Description: "Cable sauvage", Type: itemMaterial, Price: 3},
+    "mat_corb":      {ID: "mat_corb", Name: "Plume de Corbeau", Description: "Plume sombre", Type: itemMaterial, Price: 1},
+    "equip_hat":     {ID: "equip_hat", Name: "Chapeau de scene", Description: "+10 HP max", Type: itemEquipment, EffectID: effHat},
+    "equip_boot":    {ID: "equip_boot", Name: "Bottes de scene", Description: "+15 HP max", Type: itemEquipment, EffectID: effBoot},
+    "equip_tunic":   {ID: "equip_tunic", Name: "Tunique de scene", Description: "+25 HP max", Type: itemEquipment, EffectID: effTunic},
+    "equip_glove":   {ID: "equip_glove", Name: "Gant legendaire", Description: "+25 HP max", Type: itemEquipment, EffectID: effGlove},
+    "disc_loup":     {ID: "disc_loup", Name: "Disque Loup", Description: "Bonus contre les haters", Type: itemSpecial, EffectID: effDiscHater},
+    "disc_troll":    {ID: "disc_troll", Name: "Disque Troll", Description: "Bonus contre les crews solides", Type: itemSpecial, EffectID: effDiscCrew},
+    "disc_sanglier": {ID: "disc_sanglier", Name: "Disque Sanglier", Description: "Ignore la garde des boss", Type: itemSpecial, EffectID: effDiscBoss},
+    "disc_corb":     {ID: "disc_corb", Name: "Disque Corbeau", Description: "Empoisonne pendant deux tours", Type: itemSpecial, EffectID: effDiscPoison},
+    "boost_x2":      {ID: "boost_x2", Name: "Boost degats x2", Description: "Double les degats pour ce combat", Type: itemBoost, BetPointCost: 15, EffectID: effBoostX2},
+    "boost_x4":      {ID: "boost_x4", Name: "Boost degats x4", Description: "Degats x4 pour ce combat", Type: itemBoost, BetPointCost: 40, EffectID: effBoostX4},
+    "pass_label":    {ID: "pass_label", Name: "Pass presidentiel", Description: "Ouvre l'acces au QG du label", Type: itemSpecial, EffectID: effPass},
+    "crew_totem":    {ID: "crew_totem", Name: "Pouvoir d'invocation", Description: "Invoque le crew de Kaaris", Type: itemSpecial, EffectID: effCrew},
+}
 
-    // Valeurs initiales pour l'entraînement : ennemis peu résistants
-    g.TrainingEnemyBaseHP = 20
-    g.TrainingEnemyBaseAttack = 5
+var recipes = []RecipeDefinition{
+    {ID: "rec_hat", Name: "Chapeau de scene", Inputs: []string{"mat_corb", "mat_sanglier"}, OutputID: "equip_hat", CraftCost: 5},
+    {ID: "rec_boot", Name: "Bottes de scene", Inputs: []string{"mat_loup", "mat_sanglier"}, OutputID: "equip_boot", CraftCost: 5},
+    {ID: "rec_tunic", Name: "Tunique de scene", Inputs: []string{"mat_loup", "mat_loup", "mat_troll"}, OutputID: "equip_tunic", CraftCost: 8},
+    {ID: "rec_disc_l", Name: "Disque Loup", Inputs: []string{"mat_loup", "potion_poison"}, OutputID: "disc_loup", CraftCost: 0},
+    {ID: "rec_disc_t", Name: "Disque Troll", Inputs: []string{"mat_troll", "potion_poison"}, OutputID: "disc_troll", CraftCost: 0},
+    {ID: "rec_disc_s", Name: "Disque Sanglier", Inputs: []string{"mat_sanglier", "potion_poison"}, OutputID: "disc_sanglier", CraftCost: 0},
+    {ID: "rec_disc_c", Name: "Disque Corbeau", Inputs: []string{"mat_corb", "potion_poison"}, OutputID: "disc_corb", CraftCost: 0},
+}
 
-    // Définition des potions et objets spéciaux vendus chez le marchand
-    g.Merchant = []Item{
-        // Potion de vie : soigne 50 PV【936002994787532†L100-L112】
-        {Name: "Potion de vie", Type: Consumable, Description: "Soigne 50 PV", Price: 3, Effect: func(p *Character) bool {
-            heal := 50
-            if p.HP+heal > p.MaxHP {
-                p.HP = p.MaxHP
-            } else {
-                p.HP += heal
-            }
-            fmt.Println("Vous buvez une potion de vie et récupérez des PV.")
-            return true
-        }},
-        // Potion empoisonnée : utilisée seulement pour fabriquer des disques empoisonnés
-        {Name: "Potion empoisonnée", Type: Consumable, Description: "À combiner pour créer un disque empoisonné", Price: 6, Effect: func(p *Character) bool {
-            fmt.Println("Cette potion doit être combinée avec un matériau au forgeron.")
+var effects = map[string]func(g *Game, c *Character, enemy *Enemy) bool{
+    effHeal: func(g *Game, c *Character, enemy *Enemy) bool {
+        heal := 50
+        if c.HP+heal > c.MaxHP {
+            c.HP = c.MaxHP
+        } else {
+            c.HP += heal
+        }
+        fmt.Printf("%s boit une potion de vie (+50 HP).\n", c.Name)
+        return true
+    },
+    effMana: func(g *Game, c *Character, enemy *Enemy) bool {
+        gain := 20
+        if c.Mana+gain > c.MaxMana {
+            c.Mana = c.MaxMana
+        } else {
+            c.Mana += gain
+        }
+        fmt.Printf("%s retrouve 20 MP.\n", c.Name)
+        return true
+    },
+    effPoison: func(g *Game, c *Character, enemy *Enemy) bool {
+        loss := 30
+        c.HP -= loss
+        if c.HP < 0 {
+            c.HP = 0
+        }
+        fmt.Println("Cette potion est trop toxique pour etre bu. Gardez-la pour le craft.")
+        return true
+    },
+    effNote: func(g *Game, c *Character, enemy *Enemy) bool {
+        if c.HasNoteSpell {
+            fmt.Println("Vous connaissez deja Note explosive.")
             return false
-        }},
-        // Potion d'énergie : rend 20 points de mana【936002994787532†L100-L112】
-        {Name: "Potion d'énergie", Type: Consumable, Description: "Rend 20 points de mana", Price: 5, Effect: func(p *Character) bool {
-            if p.Mana+20 > p.MaxMana {
-                p.Mana = p.MaxMana
-            } else {
-                p.Mana += 20
-            }
-            fmt.Println("Vous buvez une potion d'énergie et récupérez de la mana.")
-            return true
-        }},
-        // Livre de Sort : Note explosive : permet d'apprendre le sort magique
-        {Name: "Livre de Sort : Note explosive", Type: Special, Description: "Permet d'apprendre le sort Note explosive", Price: 25, Effect: func(p *Character) bool {
-            if p.HasNoteSpell {
-                fmt.Println("Vous maîtrisez déjà le sort Note explosive.")
-                return false
-            }
-            p.HasNoteSpell = true
-            fmt.Println("Vous avez appris le sort Note explosive !")
-            return true
-        }},
-        // Augmentation d'inventaire : +10 emplacements (max 3 fois)【936002994787532†L195-L206】
-        {Name: "Augmentation d’inventaire", Type: Special, Description: "+10 emplacements d'inventaire", Price: 30, Effect: func(p *Character) bool {
-            if p.InventoryMax >= 40 {
-                fmt.Println("Votre inventaire est déjà au maximum.")
-                return false
-            }
-            p.InventoryMax += 10
-            fmt.Println("Vous augmentez la capacité de votre sacoche à vinyles !")
-            return true
-        }},
+        }
+        c.HasNoteSpell = true
+        fmt.Println("Note explosive apprise !")
+        return true
+    },
+    effBag: func(g *Game, c *Character, enemy *Enemy) bool {
+        if c.InventoryMax >= 40 {
+            fmt.Println("Votre sacoche est deja optimisee.")
+            return false
+        }
+        c.InventoryMax += 10
+        fmt.Printf("Capacite de sacoche portee a %d objets.\n", c.InventoryMax)
+        return true
+    },
+    effHat: func(g *Game, c *Character, enemy *Enemy) bool {
+        c.MaxHP += 10
+        c.HP += 10
+        fmt.Println("Vous portez le Chapeau de scene : +10 HP max.")
+        return true
+    },
+    effBoot: func(g *Game, c *Character, enemy *Enemy) bool {
+        c.MaxHP += 15
+        c.HP += 15
+        fmt.Println("Bottes de scene equipees : +15 HP max.")
+        return true
+    },
+    effTunic: func(g *Game, c *Character, enemy *Enemy) bool {
+        c.MaxHP += 25
+        c.HP += 25
+        fmt.Println("Tunique de scene equipee : +25 HP max.")
+        return true
+    },
+    effGlove: func(g *Game, c *Character, enemy *Enemy) bool {
+        c.MaxHP += 25
+        c.HP += 25
+        fmt.Println("Le Gant legendaire pulse. +25 HP max.")
+        return true
+    },
+    effDiscHater: func(g *Game, c *Character, enemy *Enemy) bool {
+        if enemy == nil {
+            fmt.Println("Ce disque doit etre utilise en combat.")
+            return false
+        }
+        dmg := 10
+        if enemy.Type == enemyHater {
+            dmg += 10
+        }
+        enemy.HP -= dmg
+        if enemy.HP < 0 {
+            enemy.HP = 0
+        }
+        fmt.Printf("Disque de Loup : %s subit %d degats.\n", enemy.Name, dmg)
+        return true
+    },
+    effDiscCrew: func(g *Game, c *Character, enemy *Enemy) bool {
+        if enemy == nil {
+            fmt.Println("Ce disque doit etre utilise en combat.")
+            return false
+        }
+        dmg := 15
+        if enemy.Type == enemyCrew {
+            dmg += 15
+        }
+        enemy.HP -= dmg
+        if enemy.HP < 0 {
+            enemy.HP = 0
+        }
+        fmt.Printf("Disque de Troll : %s subit %d degats.\n", enemy.Name, dmg)
+        return true
+    },
+    effDiscBoss: func(g *Game, c *Character, enemy *Enemy) bool {
+        c.IgnoreGuard = true
+        fmt.Println("Disque de Sanglier : votre prochaine attaque ignore la garde !")
+        return true
+    },
+    effDiscPoison: func(g *Game, c *Character, enemy *Enemy) bool {
+        if enemy == nil {
+            fmt.Println("Ce disque doit etre utilise en combat.")
+            return false
+        }
+        enemy.PoisonTurns = 2
+        enemy.PoisonDmg = 5
+        fmt.Printf("Disque de Corbeau : %s est empoisonne.\n", enemy.Name)
+        return true
+    },
+    effBoostX2: func(g *Game, c *Character, enemy *Enemy) bool {
+        c.BattleBoost = 2
+        fmt.Printf("%s entre en mode boost : degats x2.\n", c.Name)
+        return true
+    },
+    effBoostX4: func(g *Game, c *Character, enemy *Enemy) bool {
+        c.BattleBoost = 4
+        fmt.Printf("%s declenche la transe : degats x4 !\n", c.Name)
+        return true
+    },
+    effPass: func(g *Game, c *Character, enemy *Enemy) bool {
+        fmt.Println("Le pass presidentiel ouvrira certaines portes scenario.")
+        return false
+    },
+    effCrew: func(g *Game, c *Character, enemy *Enemy) bool {
+        if enemy == nil {
+            fmt.Println("Personne a viser.")
+            return false
+        }
+        dmg := 25
+        enemy.HP -= dmg
+        if enemy.HP < 0 {
+            enemy.HP = 0
+        }
+        fmt.Printf("Le crew de Kaaris surgit et inflige %d degats a %s !\n", dmg, enemy.Name)
+        return true
+    },
+}
+func read(reader *bufio.Reader) string {
+    line, err := reader.ReadString('\n')
+    if err != nil {
+        return strings.TrimSpace(line)
     }
-    // Matériaux vendus chez le disquaire (pour craft)
-    g.Materials = []Item{
-        {Name: "Sample de Loup", Type: Material, Description: "Matériau pour disque", Price: 4},
-        {Name: "Partition de Troll", Type: Material, Description: "Matériau pour disque", Price: 7},
-        {Name: "Câble de Sanglier", Type: Material, Description: "Matériau pour disque", Price: 3},
-        {Name: "Plume de Corbeau", Type: Material, Description: "Matériau pour disque", Price: 1},
+    return strings.TrimSpace(line)
+}
+
+func banner(title string) {
+    fmt.Println()
+    border := strings.Repeat("=", len(title)+8)
+    fmt.Println(border)
+    fmt.Printf("==  %s  ==\n", title)
+    fmt.Println(border)
+}
+
+func block(reader *bufio.Reader, lines ...string) {
+    for _, line := range lines {
+        fmt.Println(line)
     }
-    // Ajout des matériaux au marchand
-    g.Merchant = append(g.Merchant, g.Materials...)
-    // Définition des recettes de craft : équipements de scène et disques empoisonnés
-    g.Recipes = []Recipe{
-        // Chapeau de scène : +10 PV max【936002994787532†L132-L135】
-        {Name: "Chapeau de scène", Inputs: []string{"Plume de Corbeau", "Câble de Sanglier"}, Output: Item{Name: "Chapeau de scène", Type: Equipment, Description: "+10 PV max", Price: 0, Effect: func(p *Character) bool {
-            p.MaxHP += 10
-            p.HP += 10
-            fmt.Println("Vous équipez le Chapeau de scène, votre PV max augmente de 10 !")
-            return true
-        }}},
-        // Tunique de scène : +25 PV max【936002994787532†L132-L135】
-        {Name: "Tunique de scène", Inputs: []string{"Sample de Loup", "Sample de Loup", "Partition de Troll"}, Output: Item{Name: "Tunique de scène", Type: Equipment, Description: "+25 PV max", Price: 0, Effect: func(p *Character) bool {
-            p.MaxHP += 25
-            p.HP += 25
-            fmt.Println("Vous équipez la Tunique de scène, votre PV max augmente de 25 !")
-            return true
-        }}},
-        // Bottes de scène : +15 PV max【936002994787532†L132-L135】
-        {Name: "Bottes de scène", Inputs: []string{"Sample de Loup", "Câble de Sanglier"}, Output: Item{Name: "Bottes de scène", Type: Equipment, Description: "+15 PV max", Price: 0, Effect: func(p *Character) bool {
-            p.MaxHP += 15
-            p.HP += 15
-            fmt.Println("Vous équipez les Bottes de scène, votre PV max augmente de 15 !")
-            return true
-        }}},
-        // Disques empoisonnés : effets spécifiques【936002994787532†L138-L160】
-        {Name: "Disque de Loup Empoisonné", Inputs: []string{"Sample de Loup", "Potion empoisonnée"}, Output: Item{Name: "Disque de Loup Empoisonné", Type: Special, Description: "+10 dégâts contre haters", Price: 0}},
-        {Name: "Disque de Troll Empoisonné", Inputs: []string{"Partition de Troll", "Potion empoisonnée"}, Output: Item{Name: "Disque de Troll Empoisonné", Type: Special, Description: "+15 dégâts contre sbires costauds", Price: 0}},
-        {Name: "Disque de Sanglier Empoisonné", Inputs: []string{"Câble de Sanglier", "Potion empoisonnée"}, Output: Item{Name: "Disque de Sanglier Empoisonné", Type: Special, Description: "Ignore la défense d’un boss pendant 1 tour", Price: 0}},
-        {Name: "Disque de Corbeau Empoisonné", Inputs: []string{"Plume de Corbeau", "Potion empoisonnée"}, Output: Item{Name: "Disque de Corbeau Empoisonné", Type: Special, Description: "Inflige poison pendant 2 tours", Price: 0}},
+    fmt.Print("[Entrer pour continuer]")
+    read(reader)
+    fmt.Println()
+}
+
+func shortRest(party []*Character) {
+    for _, ch := range party {
+        if ch.HP <= 0 {
+            continue
+        }
+        ch.HP += 10
+        if ch.HP > ch.MaxHP {
+            ch.HP = ch.MaxHP
+        }
+        ch.Mana += 5
+        if ch.Mana > ch.MaxMana {
+            ch.Mana = ch.MaxMana
+        }
+    }
+}
+
+func showSoloHud(player *Character, enemy *Enemy) {
+    fmt.Println()
+    fmt.Printf("%s | HP %d/%d | MP %d/%d | Points de mise %d\n", player.Name, player.HP, player.MaxHP, player.Mana, player.MaxMana, player.BetPts)
+    fmt.Printf("%s | HP %d/%d | ATK %d | Style %s\n\n", enemy.Name, enemy.HP, enemy.MaxHP, enemy.Attack, enemy.Style)
+}
+
+func showPartyHud(party []*Character, enemies []Enemy) {
+    fmt.Println("\n-- Equipe --")
+    for _, ch := range party {
+        status := fmt.Sprintf("HP %d/%d | MP %d/%d", ch.HP, ch.MaxHP, ch.Mana, ch.MaxMana)
+        if ch.HP <= 0 {
+            status = "KO"
+        }
+        fmt.Printf("%s: %s\n", ch.Name, status)
+    }
+    fmt.Println("-- Ennemis --")
+    for i, enemy := range enemies {
+        status := fmt.Sprintf("HP %d/%d", enemy.HP, enemy.MaxHP)
+        if enemy.HP <= 0 {
+            status = "KO"
+        }
+        fmt.Printf("%d) %s [%s] %s\n", i+1, enemy.Name, enemy.Style, status)
+    }
+    fmt.Println()
+}
+
+
+
+func applyItem(g *Game, c *Character, enemy *Enemy, id string) bool {
+    def, ok := items[id]
+    if !ok {
+        fmt.Println("Objet inconnu.")
+        return false
+    }
+    handler := effects[def.EffectID]
+    if handler == nil {
+        fmt.Println("L'objet ne peut pas etre utilise ici.")
+        return false
+    }
+    consumed := handler(g, c, enemy)
+    return consumed
+}
+
+func (c *Character) addItem(id string) bool {
+    if len(c.Inventory) >= c.InventoryMax {
+        fmt.Println("Votre sacoche est pleine.")
+        return false
+    }
+    c.Inventory = append(c.Inventory, id)
+    return true
+}
+
+func (c *Character) removeItems(ids []string) bool {
+    needed := map[string]int{}
+    for _, id := range ids {
+        needed[id]++
+    }
+    indexes := []int{}
+    for i, have := range c.Inventory {
+        if needed[have] > 0 {
+            needed[have]--
+            indexes = append(indexes, i)
+        }
+    }
+    for _, rest := range needed {
+        if rest > 0 {
+            return false
+        }
+    }
+    for i := len(indexes) - 1; i >= 0; i-- {
+        idx := indexes[i]
+        c.Inventory = append(c.Inventory[:idx], c.Inventory[idx+1:]...)
+    }
+    return true
+}
+
+func (c *Character) gainXP(amount int) {
+    c.XP += amount
+    for c.XP >= 100 {
+        c.XP -= 100
+        c.Level++
+        c.MaxHP += 6
+        c.MaxMana += 4
+        c.HP = c.MaxHP
+        c.Mana = c.MaxMana
+        fmt.Printf("%s passe niveau %d !\n", c.Name, c.Level)
+    }
+}
+
+func (c *Character) reviveIfNeeded() {
+    if c.HP <= 0 {
+        heal := c.MaxHP / 2
+        if heal < 1 {
+            heal = 1
+        }
+        c.HP = heal
+        fmt.Printf("Les fans relevent %s (%d HP).\n", c.Name, c.HP)
+    }
+}
+
+func (c *Character) resetCombatFlags() {
+    c.SpecialUsed = false
+    c.BattleBoost = 0
+    c.IgnoreGuard = false
+    c.DodgeNext = false
+}
+
+func (c *Character) printStats() {
+    fmt.Printf("\n%s [%s] - Niveau %d\n", c.Name, c.Class, c.Level)
+    fmt.Printf("HP: %d/%d | Mana: %d/%d | XP: %d/100\n", c.HP, c.MaxHP, c.Mana, c.MaxMana, c.XP)
+    fmt.Printf("Points de mise: %d | Inventaire: %d/%d\n", c.BetPts, len(c.Inventory), c.InventoryMax)
+    if c.HasNoteSpell {
+        fmt.Println("Sort appris: Note explosive")
+    } else {
+        fmt.Println("Sort appris: aucun")
+    }
+}
+
+func newGame(sm *SaveManager, profile string, state *SaveState) *Game {
+    g := &Game{
+        rng:            rand.New(rand.NewSource(time.Now().UnixNano())),
+        saver:          sm,
+        profile:        profile,
+        merchantItems: []string{"potion_hp", "potion_mana", "potion_poison", "grimoire_note", "bag_upgrade"},
+        materialItems: []string{"mat_loup", "mat_troll", "mat_sanglier", "mat_corb"},
+        boostItems:    []string{"boost_x2", "boost_x4"},
+        recipes:       recipes,
+    }
+    if state == nil {
+        g.Characters = []*Character{
+            {Name: "Hatsune Miku", Class: "Digital Idol", MaxHP: 80, HP: 80, MaxMana: 40, Mana: 40, Level: 1, BetPts: 30, Inventory: []string{"potion_hp", "potion_hp", "potion_hp"}, InventoryMax: 12, Unlocked: true},
+            {Name: "Kaaris", Class: "Force de la Rue", MaxHP: 120, HP: 120, MaxMana: 30, Mana: 30, Level: 1, InventoryMax: 12, Unlocked: false},
+            {Name: "Emmanuel Macron", Class: "Strategie Presidentielle", MaxHP: 100, HP: 100, MaxMana: 35, Mana: 35, Level: 1, InventoryMax: 12, Unlocked: false},
+            {Name: "Michael Jackson", Class: "Roi de la Pop", MaxHP: 100, HP: 100, MaxMana: 35, Mana: 35, Level: 1, InventoryMax: 12, Unlocked: false},
+        }
+        g.ZoneStatus = map[string]ZoneStatus{
+            zoneMichael: {Unlocked: true},
+            zoneKaaris:  {Unlocked: true},
+            zoneMacron:  {Unlocked: false},
+        }
+        g.Flags = map[string]bool{}
+        g.TrainingBaseHP = 24
+        g.TrainingBaseAtk = 5
+        g.Gold = 15
+        g.StoryStage = stagePrologue
+        return g
+    }
+    g.PlayerIndex = state.PlayerIndex
+    g.Characters = make([]*Character, len(state.Characters))
+    for i := range state.Characters {
+        ch := state.Characters[i]
+        ch.resetCombatFlags()
+        g.Characters[i] = &ch
+    }
+    g.StoryStage = state.StoryStage
+    g.TrainingLevel = state.TrainingLevel
+    if state.TrainingBaseHP > 0 {
+        g.TrainingBaseHP = state.TrainingBaseHP
+    } else {
+        g.TrainingBaseHP = 24
+    }
+    if state.TrainingBaseAtk > 0 {
+        g.TrainingBaseAtk = state.TrainingBaseAtk
+    } else {
+        g.TrainingBaseAtk = 5
+    }
+    g.FarmLevel = state.FarmLevel
+    g.CraftUnlocked = state.CraftUnlocked
+    g.Gold = state.Gold
+    g.Flags = state.Flags
+    if g.Flags == nil {
+        g.Flags = map[string]bool{}
+    }
+    g.ZoneStatus = state.ZoneStatus
+    if g.ZoneStatus == nil {
+        g.ZoneStatus = map[string]ZoneStatus{}
+    }
+    if _, ok := g.ZoneStatus[zoneMichael]; !ok {
+        g.ZoneStatus[zoneMichael] = ZoneStatus{Unlocked: true}
+    }
+    if _, ok := g.ZoneStatus[zoneKaaris]; !ok {
+        g.ZoneStatus[zoneKaaris] = ZoneStatus{Unlocked: true}
+    }
+    if _, ok := g.ZoneStatus[zoneMacron]; !ok {
+        g.ZoneStatus[zoneMacron] = ZoneStatus{Unlocked: false}
     }
     return g
 }
 
-// -----------------------------------------------------------------------------
-// Fonctions utilitaires pour l'inventaire et les personnages
+func (g *Game) snapshot() SaveState {
+    chars := make([]Character, len(g.Characters))
+    for i, ch := range g.Characters {
+        copy := *ch
+        copy.resetCombatFlags()
+        chars[i] = copy
+    }
+    return SaveState{
+        ProfileName:     g.profile,
+        PlayerIndex:     g.PlayerIndex,
+        Characters:      chars,
+        StoryStage:      g.StoryStage,
+        TrainingLevel:   g.TrainingLevel,
+        TrainingBaseHP:  g.TrainingBaseHP,
+        TrainingBaseAtk: g.TrainingBaseAtk,
+        FarmLevel:       g.FarmLevel,
+        CraftUnlocked:   g.CraftUnlocked,
+        Gold:            g.Gold,
+        Flags:           g.Flags,
+        ZoneStatus:      g.ZoneStatus,
+    }
+}
 
-// findItem recherche un objet par nom (insensible à la casse) dans l'inventaire
-// et retourne son indice, ou -1 s'il n'est pas trouvé.
-func (p *Character) findItem(name string) int {
-    for i, item := range p.Inventory {
-        if strings.EqualFold(item.Name, name) {
+func (g *Game) autoSave() {
+    if g.saver == nil {
+        return
+    }
+    if err := g.saver.save(g.snapshot()); err != nil {
+        fmt.Println("[Warn] sauvegarde impossible:", err)
+    } else {
+        fmt.Println("(Progression sauvegardee)")
+    }
+}
+
+func (g *Game) active() *Character {
+    if g.PlayerIndex < 0 || g.PlayerIndex >= len(g.Characters) {
+        g.PlayerIndex = 0
+    }
+    return g.Characters[g.PlayerIndex]
+}
+
+func (g *Game) rewardMaterial(target *Character) {
+    pool := append([]string{}, g.materialItems...)
+    if len(pool) == 0 {
+        return
+    }
+    id := pool[g.rng.Intn(len(pool))]
+    if target.addItem(id) {
+        fmt.Printf("Vous obtenez %s.\n", items[id].Name)
+    }
+}
+
+func (g *Game) useInventory(reader *bufio.Reader, user *Character, soloEnemy *Enemy, group []Enemy) bool {
+    if len(user.Inventory) == 0 {
+        fmt.Println("Votre sacoche est vide.")
+        return false
+    }
+    fmt.Println("\n=== Inventaire ===")
+    for i, id := range user.Inventory {
+        if def, ok := items[id]; ok {
+            fmt.Printf("%d) %s - %s\n", i+1, def.Name, def.Description)
+        } else {
+            fmt.Printf("%d) %s\n", i+1, id)
+        }
+    }
+    fmt.Println("0) Retour")
+    fmt.Print("Choix: ")
+    choice, err := strconv.Atoi(read(reader))
+    if err != nil || choice < 0 || choice > len(user.Inventory) {
+        fmt.Println("Choix invalide.")
+        return false
+    }
+    if choice == 0 {
+        return false
+    }
+    idx := choice - 1
+    id := user.Inventory[idx]
+    def := items[id]
+    requiresTarget := false
+    switch def.EffectID {
+    case effDiscHater, effDiscCrew, effDiscPoison, effCrew:
+        requiresTarget = true
+    }
+    var target *Enemy
+    if requiresTarget {
+        if soloEnemy != nil {
+            target = soloEnemy
+        } else {
+            alive := []int{}
+            for i := range group {
+                if group[i].HP > 0 {
+                    alive = append(alive, i)
+                }
+            }
+            if len(alive) == 0 {
+                fmt.Println("Aucun adversaire valide pour cet objet.")
+                return false
+            }
+            fmt.Println("Cibles:")
+            for _, i := range alive {
+                enemy := group[i]
+                fmt.Printf("%d) %s (HP %d/%d)\n", i+1, enemy.Name, enemy.HP, enemy.MaxHP)
+            }
+            fmt.Print("Cible: ")
+            tgt, err := strconv.Atoi(read(reader))
+            if err != nil || tgt <= 0 || tgt > len(group) || group[tgt-1].HP <= 0 {
+                fmt.Println("Cible invalide.")
+                return false
+            }
+            target = &group[tgt-1]
+        }
+    } else {
+        target = soloEnemy
+    }
+    if !applyItem(g, user, target, id) {
+        return false
+    }
+    user.Inventory = append(user.Inventory[:idx], user.Inventory[idx+1:]...)
+    return true
+}
+
+
+func (g *Game) handleMerchant(reader *bufio.Reader) {
+    fmt.Println("\n=== Disquaire independant ===")
+    listing := append([]string{}, g.merchantItems...)
+    listing = append(listing, g.materialItems...)
+    listing = append(listing, g.boostItems...)
+    active := g.active()
+    fmt.Printf("Or: %d | Points de mise: %d\n", g.Gold, active.BetPts)
+    for i, id := range listing {
+        def := items[id]
+        price := ""
+        if def.Price > 0 {
+            price = fmt.Sprintf("%d or", def.Price)
+        }
+        if def.BetPointCost > 0 {
+            if price != "" {
+                price += " + "
+            }
+            price += fmt.Sprintf("%d pts mise", def.BetPointCost)
+        }
+        if price == "" {
+            price = "gratuit"
+        }
+        fmt.Printf("%d) %s - %s (%s)\n", i+1, def.Name, def.Description, price)
+    }
+    fmt.Println("0) Retour")
+    fmt.Print("Choix: ")
+    choice, err := strconv.Atoi(read(reader))
+    if err != nil || choice <= 0 || choice > len(listing) {
+        fmt.Println("Pas d'achat.")
+        return
+    }
+    id := listing[choice-1]
+    def := items[id]
+    if def.Price > 0 && g.Gold < def.Price {
+        fmt.Println("Vous n'avez pas assez de fans (or).")
+        return
+    }
+    if def.BetPointCost > 0 && active.BetPts < def.BetPointCost {
+        fmt.Println("Points de mise insuffisants.")
+        return
+    }
+    if !active.addItem(id) {
+        return
+    }
+    g.Gold -= def.Price
+    active.BetPts -= def.BetPointCost
+    if active.BetPts < 0 {
+        active.BetPts = 0
+    }
+    fmt.Printf("Vous achetez %s.\n", def.Name)
+}
+
+func recipeInputs(ids []string) []string {
+    out := make([]string, len(ids))
+    for i, id := range ids {
+        if def, ok := items[id]; ok {
+            out[i] = def.Name
+        } else {
+            out[i] = id
+        }
+    }
+    return out
+}
+
+func (g *Game) handleCraft(reader *bufio.Reader) {
+    if !g.CraftUnlocked {
+        fmt.Println("Le forgeron Spartan n'est pas disponible pour l'instant.")
+        return
+    }
+    fmt.Println("\n=== Atelier Spartan ===")
+    active := g.active()
+    fmt.Printf("Or: %d\n", g.Gold)
+    for i, rec := range g.recipes {
+        fmt.Printf("%d) %s - besoin: %s | cout %d\n", i+1, rec.Name, strings.Join(recipeInputs(rec.Inputs), ", "), rec.CraftCost)
+    }
+    fmt.Println("0) Retour")
+    fmt.Print("Choix: ")
+    choice, err := strconv.Atoi(read(reader))
+    if err != nil || choice <= 0 || choice > len(g.recipes) {
+        fmt.Println("Aucun craft.")
+        return
+    }
+    rec := g.recipes[choice-1]
+    if g.Gold < rec.CraftCost {
+        fmt.Println("Or insuffisant.")
+        return
+    }
+    if !active.removeItems(rec.Inputs) {
+        fmt.Println("Il vous manque des materiaux.")
+        return
+    }
+    if !active.addItem(rec.OutputID) {
+        fmt.Println("Inventaire plein, craft annule.")
+        for _, id := range rec.Inputs {
+            active.addItem(id)
+        }
+        return
+    }
+    g.Gold -= rec.CraftCost
+    fmt.Printf("Vous forgez %s.\n", rec.Name)
+}
+
+func dialogueChoice(reader *bufio.Reader, prompt string, options []string) int {
+    for {
+        fmt.Println(prompt)
+        for i, opt := range options {
+            fmt.Printf("%d) %s\n", i+1, opt)
+        }
+        fmt.Print("Reponse: ")
+        choice, err := strconv.Atoi(read(reader))
+        if err == nil && choice >= 1 && choice <= len(options) {
+            return choice - 1
+        }
+        fmt.Println("Choix invalide.")
+    }
+}
+
+func (g *Game) prologue(reader *bufio.Reader) {
+    banner("Chapitre 0 - Cassette volee")
+    block(reader,
+        "Crypton Future Media - 04h02. Les serveurs clignotent en rouge.",
+        "La cassette legendaire a ete siphonnee par le label Pouler.fr.",
+        "Sans elle, le chant de Miku disparaitra dans le bruit de la pub.",
+    )
+    fmt.Println("Manager: \"Miku, Berger et Bagland verrouillent deja tous les flux.\"")
+    fmt.Println("Miku: \"Alors on va leur rappeler d'ou vient la vraie musique.\"")
+    block(reader,
+        "Un hater streame en direct votre chute annoncee.",
+        "Montre que la scene n'appartient pas aux trolls.",
+    )
+    enemy := Enemy{Name: "Hater de studio", Type: enemyHater, MaxHP: 28, HP: 28, Attack: 4, CritTimer: 3, Style: "Troll"}
+    g.fightSolo(reader, enemy, battleOptions{
+        Intro:       []string{"Hater: \"Pouler.fr gere maintenant la musique legitime !\""},
+        Victory:     []string{"Le live est coupe. Tes fans fideles se rassemblent."},
+        RewardXP:    20,
+        RewardGold:  6,
+    })
+    block(reader,
+        "Luka: \"Quatre rivales gardent la cassette: Luka, Rin, Len et KAITO.\"",
+        "Kaito: \"Cherche des allies, gagne des fans, prepare tes disques.\"",
+        "Choisis tes destinations dans l'ordre que tu veux, sauf le Palais presidentiel qui attend une equipe complete.",
+    )
+    g.StoryStage = stageArtists
+    g.autoSave()
+}
+
+func (g *Game) artistHub(reader *bufio.Reader) {
+    for {
+        banner("Carte du monde sonore")
+        allies := []string{}
+        for _, ch := range g.Characters {
+            if ch.Name == "Hatsune Miku" {
+                continue
+            }
+            if ch.Unlocked {
+                allies = append(allies, ch.Name)
+            }
+        }
+        if len(allies) == 0 {
+            fmt.Println("Allies recrutes: aucun pour le moment.")
+        } else {
+            fmt.Println("Allies recrutes: " + strings.Join(allies, ", "))
+        }
+        fmt.Printf("Or: %d | Points de mise: %d\n", g.Gold, g.active().BetPts)
+        fmt.Printf("1) Neonopolis Pop (Michael Jackson) [%s]\n", zoneLabel(g.ZoneStatus[zoneMichael]))
+        fmt.Printf("2) Banlieue Rugueuse (Kaaris) [%s]\n", zoneLabel(g.ZoneStatus[zoneKaaris]))
+        if g.ZoneStatus[zoneMacron].Unlocked {
+            fmt.Printf("3) Palais presidentiel (Macron) [%s]\n", zoneLabel(g.ZoneStatus[zoneMacron]))
+        } else {
+            fmt.Println("3) Palais presidentiel (Macron) [acces refuse]")
+        }
+        fmt.Println("0) Retour")
+        fmt.Print("Choix: ")
+        switch read(reader) {
+        case "1":
+            if g.ZoneStatus[zoneMichael].Completed {
+                fmt.Println("MJ: \"Je suis deja avec toi. On garde le groove.\"")
+            } else {
+                g.zoneMichael(reader)
+            }
+        case "2":
+            if g.ZoneStatus[zoneKaaris].Completed {
+                fmt.Println("Kaaris: \"On est ensemble. File reprendre la cassette.\"")
+            } else {
+                g.zoneKaaris(reader)
+            }
+        case "3":
+            if !g.ZoneStatus[zoneMacron].Unlocked {
+                fmt.Println("Un agent: \"Le president attend une equipe complete, pas une idole seule.\"")
+            } else if g.ZoneStatus[zoneMacron].Completed {
+                fmt.Println("Macron: \"Direction le label, la Republique te regarde.\"")
+            } else {
+                fmt.Println("Le Palais est pret a te recevoir via l'histoire principale.")
+            }
+        case "0":
+            return
+        default:
+            fmt.Println("Choix invalide.")
+        }
+        if g.ZoneStatus[zoneMichael].Completed && g.ZoneStatus[zoneKaaris].Completed && !g.ZoneStatus[zoneMacron].Unlocked {
+            fmt.Println("Un message crypte: \"Le Palais t'ouvre ses portes.\"")
+            g.ZoneStatus[zoneMacron] = ZoneStatus{Unlocked: true}
+            g.StoryStage = stageMacron
+            g.autoSave()
+            return
+        }
+    }
+}
+
+func (g *Game) playRhythmChallenge(reader *bufio.Reader) bool {
+    patterns := [][]string{
+        {"MI", "KU", "MI", "KU"},
+        {"POP", "ROCK", "POP"},
+        {"UP", "LEFT", "RIGHT", "UP"},
+        {"BEAT", "REST", "BEAT"},
+        {"LA", "MI", "SO", "LA"},
+    }
+    seq := patterns[g.rng.Intn(len(patterns))]
+    fmt.Println("MJ: \"Observe les syllabes puis renvoie-les sans erreur.\"")
+    for i, syl := range seq {
+        fmt.Printf("Beat %d -> %s\n", i+1, syl)
+        time.Sleep(350 * time.Millisecond)
+    }
+    fmt.Println("Inscris la sequence sans espace (ex: POPROCKPOP):")
+    input := strings.ToUpper(strings.ReplaceAll(read(reader), " ", ""))
+    target := strings.ToUpper(strings.Join(seq, ""))
+    if input == target {
+        fmt.Println("MJ: \"Tu as le groove.\"")
+        return true
+    }
+    fmt.Println("MJ: \"Tempo decale. Reviens quand tu seras calee.\"")
+    return false
+}
+
+func (g *Game) zoneMichael(reader *bufio.Reader) {
+    banner("Neonopolis Pop")
+    block(reader,
+        "La ville brille dans un rose synthwave.",
+        "Michael Jackson glisse d'un hologramme et te fixe.",
+        "MJ: \"Tu veux sauver la musique ? Montre que tu respectes le tempo.\"",
+    )
+    choice := dialogueChoice(reader, "Comment repondre a MJ ?", []string{"La pop respire quand on mixe futur et nostalgie.", "Je peux t'offrir un NFT unique."})
+    if choice == 1 {
+        fmt.Println("MJ: \"La musique n'est pas un produit derive. Reviens quand tu ecoutes vraiment.\"")
+        return
+    }
+    if !g.playRhythmChallenge(reader) {
+        return
+    }
+    block(reader,
+        "Les bots marketing du label saturent la place.",
+        "MJ: \"On nettoie la scene.\"",
+    )
+    enemy := Enemy{Name: "Bot viral", Type: enemyHater, MaxHP: 60, HP: 60, Attack: 7, CritTimer: 3, Style: "Pop toxique"}
+    g.fightSolo(reader, enemy, battleOptions{
+        Intro:      []string{"Les bots hurlent un refrain generique."},
+        Victory:    []string{"Les hologrammes repassent un clip libre."},
+        RewardXP:   35,
+        RewardGold: 7,
+    })
+    if !g.Characters[3].Unlocked {
+        g.Characters[3].Unlocked = true
+        g.Characters[3].HP = g.Characters[3].MaxHP
+        g.Characters[3].Mana = g.Characters[3].MaxMana
+        fmt.Println("Michael Jackson rejoint votre equipe !")
+    }
+    if g.active().addItem("equip_glove") {
+        fmt.Println("Vous recevez le Gant legendaire.")
+    }
+    g.ZoneStatus[zoneMichael] = ZoneStatus{Unlocked: true, Completed: true}
+    g.autoSave()
+}
+
+func (g *Game) zoneKaaris(reader *bufio.Reader) {
+    banner("Banlieue Rugueuse")
+    block(reader,
+        "Les tours vibrent sur un kick sale.",
+        "Kaaris attend, capuche en place, micro a la main.",
+        "Kaaris: \"Ici on respecte le travail.\"",
+    )
+    dialogueChoice(reader, "Comment t'approches-tu ?", []string{"Je viens apprendre de ta scene.", "Je veux vendre des goodies."})
+    block(reader,
+        "Des haineux testent ta solidite avant le duel.",
+    )
+    g.fightSolo(reader, Enemy{Name: "Haineux de quartier", Type: enemyCrew, MaxHP: 70, HP: 70, Attack: 7, CritTimer: 3, Style: "Rue"}, battleOptions{
+        AllowBet:     true,
+        Intro:        []string{"Le beat tombe a 90 BPM, les coudes aussi."},
+        Victory:      []string{"Le crew de reserve se retire."},
+        RewardXP:     35,
+        RewardGold:   6,
+        RewardBetPts: 1,
+    })
+    block(reader,
+        "Kaaris pose le micro entre vous.",
+        "Kaaris: \"Maintenant c'est moi que tu dois convaincre.\"",
+    )
+    duel := Enemy{Name: "Duel avec Kaaris", Type: enemyCrew, MaxHP: 95, HP: 95, Attack: 10, CritTimer: 2, Style: "Drill"}
+    if g.fightSolo(reader, duel, battleOptions{
+        Intro:      []string{"Le crew entoure le ring improvise."},
+        Victory:    []string{"Kaaris: \"Respect. J'entre dans ton equipe.\""},
+        Defeat:     []string{"Kaaris: \"Reviens avec plus de coffre.\""},
+        RewardXP:   45,
+        RewardGold: 8,
+    }) {
+        if !g.Characters[1].Unlocked {
+            g.Characters[1].Unlocked = true
+            g.Characters[1].HP = g.Characters[1].MaxHP
+            g.Characters[1].Mana = g.Characters[1].MaxMana
+            fmt.Println("Kaaris rejoint votre equipe !")
+        }
+        if g.active().addItem("crew_totem") {
+            fmt.Println("Vous obtenez le Pouvoir d'invocation du crew.")
+        }
+        if !g.CraftUnlocked {
+            fmt.Println("Un ingenieur du son Spartan ouvre son atelier: le craft est desormais disponible.")
+            g.CraftUnlocked = true
+        }
+        g.ZoneStatus[zoneKaaris] = ZoneStatus{Unlocked: true, Completed: true}
+        g.autoSave()
+    }
+}
+
+func (g *Game) macronMission(reader *bufio.Reader) {
+    status := g.ZoneStatus[zoneMacron]
+    if !status.Unlocked {
+        fmt.Println("Le Palais reste ferme pour le moment.")
+        return
+    }
+    if status.Completed {
+        fmt.Println("Macron: \"Cap sur le label, la Republique te soutient.\"")
+        g.StoryStage = stageLabel
+        return
+    }
+    banner("Palais presidentiel")
+    block(reader,
+        "Le palais ressemble a un plateau TV: marbre, drapeaux, cameras.",
+        "Emmanuel Macron ajuste son micro-cravate.",
+        "Macron: \"Montre-moi que tu connais la culture que tu defends.\"",
+    )
+    quiz := []struct{
+        q string
+        a string
+    }{
+        {"Annee du debut de la Revolution francaise ?", "1789"},
+        {"Devise inscrite sur les frontons francais ?", "liberte egalite fraternite"},
+        {"Compositeur de la Marseillaise ?", "rouget de lisle"},
+    }
+    for _, qa := range quiz {
+        fmt.Println(qa.q)
+        fmt.Print("Reponse: ")
+        ans := strings.ToLower(strings.ReplaceAll(read(reader), "e", "e"))
+        ans = strings.ReplaceAll(ans, "'", "")
+        if ans != qa.a {
+            fmt.Println("Macron: \"Reviens avec plus de fond.\"")
+            return
+        }
+        fmt.Println("Macron hoche la tete.")
+    }
+    block(reader,
+        "La division strategique du label tente de couper l'entretien.",
+        "Macron: \"Je reste a tes cotes.\"",
+    )
+    g.fightSolo(reader, Enemy{Name: "Division strategique", Type: enemyCrew, MaxHP: 100, HP: 100, Attack: 11, CritTimer: 3, Style: "Lobby"}, battleOptions{
+        Intro:      []string{"Les conseillers du label projectent des slides marketing."},
+        Victory:    []string{"Macron brandit un badge d'acces dore."},
+        RewardXP:   55,
+        RewardGold: 12,
+    })
+    if !g.Characters[2].Unlocked {
+        g.Characters[2].Unlocked = true
+        g.Characters[2].HP = g.Characters[2].MaxHP
+        g.Characters[2].Mana = g.Characters[2].MaxMana
+        fmt.Println("Macron rejoint votre equipe en tant que stratege.")
+    }
+    if g.active().addItem("pass_label") {
+        fmt.Println("Vous recevez le Pass presidentiel. Le QG peut maintenant s'ouvrir.")
+    }
+    g.ZoneStatus[zoneMacron] = ZoneStatus{Unlocked: true, Completed: true}
+    g.StoryStage = stageLabel
+    g.autoSave()
+}
+func (g *Game) labelFinal(reader *bufio.Reader) {
+    if !g.ZoneStatus[zoneMacron].Completed {
+        fmt.Println("Rassemble Macron avant de prendre d'assaut le label.")
+        return
+    }
+    party := g.party()
+    if len(party) < 4 {
+        fmt.Println("Forme d'abord ton quatuor legendaire.")
+        return
+    }
+    banner("Chapitre 4 - Label Pouler.fr")
+    block(reader,
+        "Atrium du label: neon bleu, contrats encadres, foule captive.",
+        "Les quatre rivales de Miku se preparent a defendre leur monopole.",
+    )
+    waveOne := []Enemy{
+        {Name: "Megurine Luka", Type: enemyRival, MaxHP: 95, HP: 95, Attack: 11, CritTimer: 3, Style: "Pop aquatique"},
+        {Name: "Kagamine Rin", Type: enemyRival, MaxHP: 100, HP: 100, Attack: 12, CritTimer: 3, Style: "Electro rap"},
+    }
+    if !g.fightParty(reader, party, waveOne, battleOptions{
+        Intro:      []string{"Luka lance une ballade hypnotique, Rin tranche avec des refrains rapides."},
+        Victory:    []string{"Rin: \"D'accord, Miku. Tu veux partager la scene... prouve-le.\""},
+        RewardXP:   60,
+        RewardGold: 15,
+    }) {
+        fmt.Println("Les rivales se moquent: \"Reviens avec plus de souffle.\"")
+        return
+    }
+    shortRest(party)
+    fmt.Println("La loge improvisee rend 10 HP et 5 MP a chaque allie.")
+    waveTwo := []Enemy{
+        {Name: "Kagamine Len", Type: enemyRival, MaxHP: 115, HP: 115, Attack: 13, CritTimer: 2, Style: "Rock urbain"},
+        {Name: "KAITO", Type: enemyRival, MaxHP: 125, HP: 125, Attack: 14, CritTimer: 3, Style: "Classique glace"},
+    }
+    if !g.fightParty(reader, party, waveTwo, battleOptions{
+        Intro:      []string{"Len sort une guitare electrique, KAITO dresse un mur symphonique."},
+        Victory:    []string{"KAITO: \"La scene n'appartient a personne. Gagne ton final.\""},
+        RewardXP:   70,
+        RewardGold: 18,
+    }) {
+        fmt.Println("Len: \"On vous attend pour une vraie bagarre.\"")
+        return
+    }
+    block(reader,
+        "Matthieu Berger et Sylvain Bagland applaudissent avec arrogance.",
+        "Ils declenchent des cages de verre autour de tes allies.",
+        "Miku se retrouve seule au centre de la scene.",
+    )
+    solo := []*Character{g.Characters[0]}
+    g.Characters[0].resetCombatFlags()
+    bosses := []Enemy{
+        {Name: "Matthieu Berger", Type: enemyBoss, MaxHP: 165, HP: 165, Attack: 15, CritTimer: 3, Style: "Business"},
+        {Name: "Sylvain Bagland", Type: enemyBoss, MaxHP: 155, HP: 155, Attack: 15, CritTimer: 2, Style: "Business"},
+    }
+    if !g.fightParty(reader, solo, bosses, battleOptions{
+        Intro: []string{"Berger: \"Sans ta cassette tu n'es rien.\"", "Bagland: \"La musique se monetise, point.\""},
+        Victory: []string{"La cassette legendaire scintille de nouveau entre les mains de Miku."},
+        Defeat:  []string{"Berger: \"Le marche decide. Reviens avec plus de fans.\""},
+        RewardXP:   120,
+        RewardGold: 25,
+        IsBoss:     true,
+    }) {
+        fmt.Println("Les dirigeants sourient: \"On te verra a la prochaine sortie.\"")
+        return
+    }
+    block(reader,
+        "Les cages explosent, tes allies te rejoignent.",
+        "Miku remet la cassette dans son lecteur: le monde entier recoit a nouveau des melodies libres.",
+        "La vraie musique appartient aux artistes et au public, pas aux labels.",
+    )
+    g.StoryStage = stageFinish
+    g.autoSave()
+}
+func baseAttack(c *Character) int {
+    switch c.Name {
+    case "Kaaris":
+        return 12
+    case "Michael Jackson":
+        return 10
+    case "Emmanuel Macron":
+        return 9
+    default:
+        return 9
+    }
+}
+
+
+func (g *Game) performSpecial(c *Character, enemy *Enemy) bool {
+    if c == nil {
+        return false
+    }
+    switch c.Name {
+    case "Hatsune Miku":
+        if !c.HasNoteSpell {
+            fmt.Println("Miku n'a pas encore retrouve la note explosive.")
+            return false
+        }
+        if enemy == nil {
+            fmt.Println("Aucune cible a pulveriser.")
+            return false
+        }
+        cost := 15
+        if c.Mana < cost {
+            fmt.Println("Pas assez de mana pour la note explosive legendaire.")
+            return false
+        }
+        c.Mana -= cost
+        dmg := 30 + g.rng.Intn(11)
+        if c.BattleBoost > 0 {
+            dmg *= c.BattleBoost
+        }
+        if c.IgnoreGuard {
+            dmg += 8
+            c.IgnoreGuard = false
+        }
+        enemy.HP -= dmg
+        if enemy.HP < 0 {
+            enemy.HP = 0
+        }
+        fmt.Printf("Miku declenche la note explosive legendaire (-%d HP).\n", dmg)
+    case "Kaaris":
+        if enemy == nil {
+            fmt.Println("Pas de cible pour invoquer le crew.")
+            return false
+        }
+        dmg := 34 + g.rng.Intn(13)
+        if c.BattleBoost > 0 {
+            dmg *= c.BattleBoost
+        }
+        if c.IgnoreGuard {
+            dmg += 10
+            c.IgnoreGuard = false
+        }
+        enemy.HP -= dmg
+        if enemy.HP < 0 {
+            enemy.HP = 0
+        }
+        fmt.Printf("Kaaris invoque son crew (-%d HP).\n", dmg)
+    case "Emmanuel Macron":
+        if enemy == nil {
+            fmt.Println("Pas de cible pour le discours manipulateur.")
+            return false
+        }
+        cost := 12
+        if c.Mana < cost {
+            fmt.Println("Pas assez d'energie pour le discours manipulateur.")
+            return false
+        }
+        c.Mana -= cost
+        if enemy.WeakenTurns < 2 {
+            enemy.WeakenTurns = 2
+        }
+        fmt.Printf("Macron deboussole %s : ses degats sont divises pendant 2 tours.\n", enemy.Name)
+    case "Michael Jackson":
+        if enemy == nil {
+            fmt.Println("Le moonwalk attend un adversaire.")
+            return false
+        }
+        cost := 8
+        if c.Mana < cost {
+            fmt.Println("Pas assez d'energie pour le moonwalk.")
+            return false
+        }
+        c.Mana -= cost
+        dmg := 20 + g.rng.Intn(9)
+        if c.BattleBoost > 0 {
+            dmg *= c.BattleBoost
+        }
+        if c.IgnoreGuard {
+            dmg += 6
+            c.IgnoreGuard = false
+        }
+        enemy.HP -= dmg
+        if enemy.HP < 0 {
+            enemy.HP = 0
+        }
+        c.DodgeNext = true
+        fmt.Printf("MJ glisse en moonwalk et inflige %d degats. Il esquivera le prochain coup.\n", dmg)
+    default:
+        fmt.Println("Pas de capacite speciale propre.")
+        return false
+    }
+    c.SpecialUsed = true
+    return true
+}
+
+
+func (g *Game) fightSolo(reader *bufio.Reader, enemy Enemy, opts battleOptions) bool {
+    player := g.active()
+    player.resetCombatFlags()
+    enemy.HP = enemy.MaxHP
+    if enemy.CritTimer <= 0 {
+        enemy.CritTimer = 3
+    }
+    for _, line := range opts.Intro {
+        fmt.Println("[INFO]", line)
+    }
+    bet := 1
+    if opts.AllowBet && player.BetPts > 0 {
+        fmt.Printf("Points de mise disponibles: %d (0 aucun, 2/3/4 pour miser) -> ", player.BetPts)
+        switch read(reader) {
+        case "2":
+            if player.BetPts >= 2 {
+                bet = 2
+            }
+        case "3":
+            if player.BetPts >= 3 {
+                bet = 3
+            }
+        case "4":
+            if player.BetPts >= 4 {
+                bet = 4
+            }
+        }
+    }
+    enemy.HP *= bet
+    enemy.MaxHP = enemy.HP
+    enemy.Attack = int(float64(enemy.Attack) * math.Sqrt(float64(bet)))
+    turn := 1
+    for enemy.HP > 0 && player.HP > 0 {
+        showSoloHud(player, &enemy)
+        fmt.Printf("Tour %d\n", turn)
+        fmt.Println("1) Attaquer")
+        if player.HasNoteSpell {
+            fmt.Println("2) Note explosive")
+        } else {
+            fmt.Println("2) Note explosive (verrouille)")
+        }
+        fmt.Println("3) Capacite speciale")
+        fmt.Println("4) Inventaire")
+        fmt.Println("5) Observer")
+        if opts.AllowEscape {
+            fmt.Println("6) Fuir")
+        }
+        fmt.Print("Action: ")
+        input := read(reader)
+        if input == "menu" {
+            if g.battlePause(reader) == "abort" {
+                fmt.Println("Vous quittez le combat.")
+                return false
+            }
+            continue
+        }
+        consume := true
+        switch input {
+        case "1":
+            dmg := baseAttack(player) + g.rng.Intn(4)
+            if player.BattleBoost > 0 {
+                dmg *= player.BattleBoost
+            }
+            if player.IgnoreGuard {
+                dmg += 6
+                player.IgnoreGuard = false
+            }
+            enemy.HP -= dmg
+            if enemy.HP < 0 {
+                enemy.HP = 0
+            }
+            fmt.Printf("%s inflige %d degats.\n", player.Name, dmg)
+        case "2":
+            if !player.HasNoteSpell {
+                fmt.Println("Vous n'avez pas encore appris ce sort.")
+                consume = false
+            } else if player.Mana < 10 {
+                fmt.Println("Pas assez de mana.")
+                consume = false
+            } else {
+                player.Mana -= 10
+                dmg := 18 + g.rng.Intn(6)
+                if player.BattleBoost > 0 {
+                    dmg *= player.BattleBoost
+                }
+                if player.IgnoreGuard {
+                    dmg += 8
+                    player.IgnoreGuard = false
+                }
+                enemy.HP -= dmg
+                if enemy.HP < 0 {
+                    enemy.HP = 0
+                }
+                fmt.Printf("Note explosive inflige %d degats.\n", dmg)
+            }
+        case "3":
+            if player.SpecialUsed {
+                fmt.Println("Capacite deja utilisee.")
+                consume = false
+            } else if !g.performSpecial(player, &enemy) {
+                consume = false
+            }
+        case "4":
+            if !g.useInventory(reader, player, &enemy, nil) {
+                consume = false
+            }
+        case "5":
+            fmt.Printf("%s (%s) HP %d/%d | ATK %d\n", enemy.Name, enemy.Style, enemy.HP, enemy.MaxHP, enemy.Attack)
+            consume = false
+        case "6":
+            if opts.AllowEscape {
+                fmt.Println("Vous battez en retraite.")
+                return false
+            }
+            fmt.Println("Impossible de fuir.")
+            consume = false
+        default:
+            fmt.Println("Action inconnue.")
+            consume = false
+        }
+        if enemy.HP <= 0 {
+            break
+        }
+        if consume {
+            if enemy.PoisonTurns > 0 {
+                enemy.HP -= enemy.PoisonDmg
+                if enemy.HP < 0 {
+                    enemy.HP = 0
+                }
+                fmt.Printf("Le poison ronge %s (-%d HP).\n", enemy.Name, enemy.PoisonDmg)
+                enemy.PoisonTurns--
+                if enemy.HP <= 0 {
+                    break
+                }
+            }
+            dmg := enemy.Attack
+            if enemy.WeakenTurns > 0 {
+                dmg = int(math.Round(float64(dmg) * 0.6))
+                if dmg < 1 {
+                    dmg = 1
+                }
+                enemy.WeakenTurns--
+            }
+            if enemy.CritTimer <= 1 {
+                dmg *= 2
+                enemy.CritTimer = 3
+                fmt.Println("L'ennemi place un critique !")
+            } else {
+                enemy.CritTimer--
+            }
+            if player.DodgeNext {
+                fmt.Printf("%s esquive le coup !\n", player.Name)
+                player.DodgeNext = false
+            } else {
+                player.HP -= dmg
+                if player.HP < 0 {
+                    player.HP = 0
+                }
+                fmt.Printf("%s subit %d degats.\n", player.Name, dmg)
+            }
+        }
+        turn++
+    }
+    if enemy.HP <= 0 {
+        fmt.Println("Victoire !")
+        xpGain := opts.RewardXP * bet
+        if xpGain > 0 {
+            player.gainXP(xpGain)
+        }
+        goldGain := opts.RewardGold * bet
+        if goldGain > 0 {
+            g.Gold += goldGain
+        }
+        if opts.AllowBet && bet > 1 {
+            player.BetPts += bet - 1
+            fmt.Printf("Gain de mise: +%d (total %d).\n", bet-1, player.BetPts)
+        }
+        if opts.RewardBetPts > 0 {
+            player.BetPts += opts.RewardBetPts * bet
+            fmt.Printf("Points de mise bonus: +%d.\n", opts.RewardBetPts*bet)
+        }
+        if goldGain > 0 || xpGain > 0 {
+            fmt.Printf("Recompenses: +%d or | +%d XP\n", goldGain, xpGain)
+        }
+        for _, line := range opts.Victory {
+            fmt.Println(line)
+        }
+        return true
+    }
+    fmt.Println("Defaite...")
+    player.reviveIfNeeded()
+    if opts.AllowBet && bet > 1 {
+        player.BetPts -= bet
+        if player.BetPts < 0 {
+            player.BetPts = 0
+        }
+    }
+    for _, line := range opts.Defeat {
+        fmt.Println(line)
+    }
+    return false
+}
+
+func allEnemiesDown(enemies []Enemy) bool {
+    for _, e := range enemies {
+        if e.HP > 0 {
+            return false
+        }
+    }
+    return true
+}
+
+func allAlliesDown(party []*Character) bool {
+    for _, c := range party {
+        if c.HP > 0 {
+            return false
+        }
+    }
+    return true
+}
+
+func targetAlive(rng *rand.Rand, party []*Character) *Character {
+    alive := []*Character{}
+    for _, ch := range party {
+        if ch.HP > 0 {
+            alive = append(alive, ch)
+        }
+    }
+    if len(alive) == 0 {
+        return nil
+    }
+    return alive[rng.Intn(len(alive))]
+}
+
+func (g *Game) fightParty(reader *bufio.Reader, party []*Character, enemies []Enemy, opts battleOptions) bool {
+    for _, ch := range party {
+        ch.resetCombatFlags()
+        ch.reviveIfNeeded()
+    }
+    for i := range enemies {
+        enemies[i].HP = enemies[i].MaxHP
+        if enemies[i].CritTimer <= 0 {
+            enemies[i].CritTimer = 3
+        }
+    }
+    for _, line := range opts.Intro {
+        fmt.Println("[INFO]", line)
+    }
+    round := 1
+    for {
+        if allEnemiesDown(enemies) {
+            fmt.Println("Victoire du groupe !")
+            if opts.RewardXP > 0 {
+                for _, ch := range party {
+                    ch.gainXP(opts.RewardXP)
+                }
+            }
+            if opts.RewardGold > 0 {
+                g.Gold += opts.RewardGold
+            }
+            if opts.RewardGold > 0 || opts.RewardXP > 0 {
+                fmt.Printf("Recompenses: +%d or | +%d XP par allie\n", opts.RewardGold, opts.RewardXP)
+            }
+            for _, line := range opts.Victory {
+                fmt.Println(line)
+            }
+            return true
+        }
+        if allAlliesDown(party) {
+            fmt.Println("L'equipe tombe !")
+            for _, ch := range party {
+                ch.reviveIfNeeded()
+            }
+            for _, line := range opts.Defeat {
+                fmt.Println(line)
+            }
+            return false
+        }
+        showPartyHud(party, enemies)
+        fmt.Printf("Tour %d\n", round)
+        for _, ch := range party {
+            if ch.HP <= 0 {
+                continue
+            }
+            fmt.Printf("\n%s (HP %d/%d | MP %d/%d)\n", ch.Name, ch.HP, ch.MaxHP, ch.Mana, ch.MaxMana)
+            fmt.Println("1) Attaquer")
+            if ch.HasNoteSpell {
+                fmt.Println("2) Note explosive")
+            } else {
+                fmt.Println("2) Note explosive (verrouille)")
+            }
+            fmt.Println("3) Capacite speciale")
+            fmt.Println("4) Inventaire")
+            fmt.Println("5) Observer")
+            fmt.Print("Action: ")
+            input := read(reader)
+            if input == "menu" {
+                if g.battlePause(reader) == "abort" {
+                    fmt.Println("Retraite generale.")
+                    return false
+                }
+                input = ""
+            }
+            consume := true
+            switch input {
+            case "1":
+                target := selectEnemy(reader, enemies)
+                if target == nil {
+                    consume = false
+                    break
+                }
+                dmg := baseAttack(ch) + g.rng.Intn(5)
+                if ch.BattleBoost > 0 {
+                    dmg *= ch.BattleBoost
+                }
+                if ch.IgnoreGuard {
+                    dmg += 6
+                    ch.IgnoreGuard = false
+                }
+                target.HP -= dmg
+                if target.HP < 0 {
+                    target.HP = 0
+                }
+                fmt.Printf("%s frappe %s pour %d degats.\n", ch.Name, target.Name, dmg)
+            case "2":
+                if !ch.HasNoteSpell || ch.Mana < 10 {
+                    fmt.Println("Sort indisponible.")
+                    consume = false
+                } else {
+                    ch.Mana -= 10
+                    target := selectEnemy(reader, enemies)
+                    if target == nil {
+                        ch.Mana += 10
+                        consume = false
+                        break
+                    }
+                    dmg := 18 + g.rng.Intn(7)
+                    if ch.BattleBoost > 0 {
+                        dmg *= ch.BattleBoost
+                    }
+                    if ch.IgnoreGuard {
+                        dmg += 8
+                        ch.IgnoreGuard = false
+                    }
+                    target.HP -= dmg
+                    if target.HP < 0 {
+                        target.HP = 0
+                    }
+                    fmt.Printf("Note explosive touche %s pour %d degats.\n", target.Name, dmg)
+                }
+            case "3":
+                idx := firstAliveEnemy(enemies)
+                if idx == -1 {
+                    consume = false
+                    break
+                }
+                if ch.SpecialUsed {
+                    fmt.Println("Capacite deja utilisee.")
+                    consume = false
+                } else if !g.performSpecial(ch, &enemies[idx]) {
+                    consume = false
+                }
+            case "4":
+                if !g.useInventory(reader, ch, nil, enemies) {
+                    consume = false
+                }
+            case "5":
+                printEnemies(enemies)
+                consume = false
+            default:
+                fmt.Println("Action inconnue.")
+                consume = false
+            }
+            if consume {
+                continue
+            }
+        }
+        if allEnemiesDown(enemies) {
+            continue
+        }
+        for i := range enemies {
+            enemy := &enemies[i]
+            if enemy.HP <= 0 {
+                continue
+            }
+            if enemy.PoisonTurns > 0 {
+                enemy.HP -= enemy.PoisonDmg
+                if enemy.HP < 0 {
+                    enemy.HP = 0
+                }
+                fmt.Printf("%s souffre du poison (-%d).\n", enemy.Name, enemy.PoisonDmg)
+                enemy.PoisonTurns--
+                if enemy.HP <= 0 {
+                    continue
+                }
+            }
+            target := targetAlive(g.rng, party)
+            if target == nil {
+                continue
+            }
+            dmg := enemy.Attack
+            if enemy.WeakenTurns > 0 {
+                dmg = int(math.Round(float64(dmg) * 0.6))
+                if dmg < 1 {
+                    dmg = 1
+                }
+                enemy.WeakenTurns--
+            }
+            if enemy.CritTimer <= 1 {
+                dmg *= 2
+                enemy.CritTimer = 3
+                fmt.Printf("%s declenche un critique !\n", enemy.Name)
+            } else {
+                enemy.CritTimer--
+            }
+            if target.DodgeNext {
+                fmt.Printf("%s esquive grace au moonwalk !\n", target.Name)
+                target.DodgeNext = false
+                continue
+            }
+            target.HP -= dmg
+            if target.HP < 0 {
+                target.HP = 0
+            }
+            fmt.Printf("%s inflige %d degats a %s.\n", enemy.Name, dmg, target.Name)
+        }
+        round++
+    }
+}
+
+func firstAliveEnemy(enemies []Enemy) int {
+    for i, e := range enemies {
+        if e.HP > 0 {
             return i
         }
     }
     return -1
 }
 
-// removeItems enlève les objets dont les noms apparaissent dans names, en
-// respectant les quantités requises. Renvoie true si tous les objets sont
-// disponibles et retirés, false sinon.
-func (p *Character) removeItems(names []string) bool {
-    // Compter les occurrences requises
-    needed := make(map[string]int)
-    for _, n := range names {
-        needed[strings.ToLower(n)]++
+func selectEnemy(reader *bufio.Reader, enemies []Enemy) *Enemy {
+    fmt.Print("Cible (numero): ")
+    idx, err := strconv.Atoi(read(reader))
+    if err != nil || idx <= 0 || idx > len(enemies) {
+        fmt.Println("Cible invalide.")
+        return nil
     }
-    // Identifiez les indices à enlever
-    toRemove := []int{}
-    for i, item := range p.Inventory {
-        lower := strings.ToLower(item.Name)
-        if needed[lower] > 0 {
-            needed[lower]--
-            toRemove = append(toRemove, i)
+    if enemies[idx-1].HP <= 0 {
+        fmt.Println("Cette cible est deja a terre.")
+        return nil
+    }
+    return &enemies[idx-1]
+}
+
+func (g *Game) party() []*Character {
+    var out []*Character
+    for _, ch := range g.Characters {
+        if ch.Unlocked {
+            out = append(out, ch)
         }
     }
-    // Si certains objets manquent, annuler
-    for _, count := range needed {
-        if count > 0 {
-            return false
+    return out
+}
+
+func (g *Game) battlePause(reader *bufio.Reader) string {
+    fmt.Println("\n=== Pause combat ===")
+    fmt.Println("1) Reprendre")
+    fmt.Println("2) Quitter le combat")
+    fmt.Println("3) Sauvegarder")
+    fmt.Println("4) Statistiques")
+    fmt.Print("Choix: ")
+    choice := read(reader)
+    switch choice {
+    case "1":
+        return "resume"
+    case "2":
+        return "abort"
+    case "3":
+        g.autoSave()
+    case "4":
+        g.active().printStats()
+    default:
+        fmt.Println("Choix invalide.")
+    }
+    return "resume"
+}
+
+func (g *Game) training(reader *bufio.Reader) {
+    fmt.Println("\n=== Entrainement ===")
+    hp := g.TrainingBaseHP + g.TrainingLevel*6
+    atk := g.TrainingBaseAtk + g.TrainingLevel/2
+    enemy := Enemy{Name: "Hater d'entrainement", Type: enemyHater, MaxHP: hp, HP: hp, Attack: atk, CritTimer: 3, Style: "Troll"}
+    if g.fightSolo(reader, enemy, battleOptions{
+        AllowBet:     true,
+        Intro:        []string{"Un hater veut tester ta concentration."},
+        Victory:      []string{"Ton souffle gagne en puissance."},
+        Defeat:       []string{"Les haters ricanent. Continue de t'entrainer."},
+        RewardXP:     24,
+        RewardGold:   5,
+        RewardBetPts: 1,
+    }) {
+        g.TrainingLevel++
+        g.TrainingBaseHP += 2
+        g.TrainingBaseAtk++
+        active := g.active()
+        active.MaxHP += 5
+        active.HP += 5
+        if active.HP > active.MaxHP {
+            active.HP = active.MaxHP
         }
-    }
-    // Supprimer les éléments en partant de la fin
-    for i := len(toRemove) - 1; i >= 0; i-- {
-        idx := toRemove[i]
-        p.Inventory = append(p.Inventory[:idx], p.Inventory[idx+1:]...)
-    }
-    return true
-}
-
-// addItem ajoute un objet à l'inventaire du personnage s'il reste de la place.
-func (p *Character) addItem(item Item) bool {
-    if len(p.Inventory) >= p.InventoryMax {
-        fmt.Println("Votre sacoche à vinyles est déjà remplie.")
-        return false
-    }
-    p.Inventory = append(p.Inventory, item)
-    return true
-}
-
-// showStats affiche les statistiques du personnage et son inventaire.
-func (p *Character) showStats() {
-    fmt.Printf("\n=== Stats de %s ===\n", p.Name)
-    fmt.Printf("Classe : %s\n", p.Class)
-    fmt.Printf("Niveau : %d (XP : %d)\n", p.Level, p.XP)
-    fmt.Printf("PV : %d / %d\n", p.HP, p.MaxHP)
-    fmt.Printf("Mana : %d / %d\n", p.Mana, p.MaxMana)
-    fmt.Printf("Or : %d\n", p.Gold)
-    fmt.Printf("Points de mise : %d\n", p.BetPts)
-    fmt.Printf("Inventaire (%d/%d) :\n", len(p.Inventory), p.InventoryMax)
-    if len(p.Inventory) == 0 {
-        fmt.Println("  (vide)")
-    }
-    for i, item := range p.Inventory {
-        fmt.Printf("  %d. %s (%s)\n", i+1, item.Name, item.Description)
+        fmt.Printf("%s gagne en endurance (HP max %d).\n", active.Name, active.MaxHP)
+        g.rewardMaterial(active)
+        g.autoSave()
     }
 }
 
-// chooseCharacter permet au joueur de sélectionner un personnage disponible.
-// Le pointeur Player dans Game est mis à jour en conséquence.
+func (g *Game) farm(reader *bufio.Reader) {
+    fmt.Println("\n=== Farm d'EXP ===")
+    hp := 70 + g.FarmLevel*12
+    atk := 8 + g.FarmLevel
+    enemy := Enemy{Name: "Gardien repetitif", Type: enemyFarm, MaxHP: hp, HP: hp, Attack: atk, CritTimer: 3, Style: "Loop"}
+    if g.fightSolo(reader, enemy, battleOptions{
+        AllowEscape: true,
+        Intro:       []string{"Un adversaire sans histoire te barre la route."},
+        Victory:     []string{"Tu grappilles quelques fans et materiaux."},
+        RewardXP:    15,
+        RewardGold:  3,
+    }) {
+        g.FarmLevel++
+        g.rewardMaterial(g.active())
+        fmt.Println("Les adversaires de farm deviennent plus coriaces." )
+        g.autoSave()
+    }
+}
+
+func promptProfile(sm *SaveManager, reader *bufio.Reader) (string, *SaveState) {
+    for {
+        profiles, err := sm.list()
+        if err != nil {
+            fmt.Println("Impossible de lister les profils:", err)
+        }
+        banner("Profils")
+        if len(profiles) == 0 {
+            fmt.Println("Aucun profil. Entrez un nom pour commencer:")
+            name := read(reader)
+            if name == "" {
+                fmt.Println("Nom vide.")
+                continue
+            }
+            return name, nil
+        }
+        for i, name := range profiles {
+            fmt.Printf("%d) %s\n", i+1, name)
+        }
+        fmt.Println("0) Creer un nouveau profil")
+        fmt.Print("Choix: ")
+        choice, err := strconv.Atoi(read(reader))
+        if err != nil || choice < 0 || choice > len(profiles) {
+            fmt.Println("Choix invalide.")
+            continue
+        }
+        if choice == 0 {
+            fmt.Print("Nom du nouveau profil: ")
+            name := read(reader)
+            if name == "" {
+                fmt.Println("Nom vide.")
+                continue
+            }
+            return name, nil
+        }
+        name := profiles[choice-1]
+        state, err := sm.load(name)
+        if err != nil {
+            fmt.Println("Lecture impossible:", err)
+            continue
+        }
+        fmt.Printf("Profil '%s' charge (derniere sauvegarde %s).\n", name, state.Timestamp.Format(time.RFC1123))
+        return name, state
+    }
+}
+
 func (g *Game) chooseCharacter(reader *bufio.Reader) {
-    fmt.Println("\n=== Sélection de personnage ===")
-    for i, c := range g.Characters {
-        status := "(débloqué)"
-        if !c.Unlocked {
-            status = "(verrouillé)"
+    fmt.Println("\n=== Choix de personnage ===")
+    for i, ch := range g.Characters {
+        status := "disponible"
+        if !ch.Unlocked {
+            status = "verrouille"
         }
-        fmt.Printf("%d. %s %s\n", i+1, c.Name, status)
+        fmt.Printf("%d) %s [%s]\n", i+1, ch.Name, status)
     }
-    fmt.Print("Choisissez le numéro du personnage à incarner (0 pour revenir) : ")
-    var choice int
-    fmt.Fscanln(reader, &choice)
-    if choice <= 0 || choice > len(g.Characters) {
+    fmt.Print("Choix (0 annuler): ")
+    choice, err := strconv.Atoi(read(reader))
+    if err != nil || choice <= 0 || choice > len(g.Characters) {
+        fmt.Println("Aucun changement.")
         return
     }
-    sel := g.Characters[choice-1]
-    if !sel.Unlocked {
+    if !g.Characters[choice-1].Unlocked {
         fmt.Println("Ce personnage n'est pas encore disponible.")
         return
     }
-    g.Player = sel
-    fmt.Printf("Vous incarnez désormais %s.\n", sel.Name)
+    g.PlayerIndex = choice - 1
+    fmt.Printf("Vous incarnez maintenant %s.\n", g.active().Name)
 }
 
-// levelUpIfNeeded augmente le niveau du personnage s'il a atteint 100 XP et
-// réinitialise la barre d'expérience. Chaque niveau apporte +5 PV max et
-// +5 mana max, et régénère totalement PV et mana【936002994787532†L288-L293】.
-func (p *Character) levelUpIfNeeded() {
-    for p.XP >= 100 {
-        p.XP -= 100
-        p.Level++
-        p.MaxHP += 5
-        p.MaxMana += 5
-        p.HP = p.MaxHP
-        p.Mana = p.MaxMana
-        fmt.Printf("\nFélicitations ! %s passe au niveau %d. PV et Mana augmentent.\n", p.Name, p.Level)
-    }
-}
-
-// resurrectIfNeeded réanime le personnage s'il est mort. Selon la bible,
-// lorsqu'un artiste tombe à 0 PV, il revient à 50 % de ses PV grâce à ses fans【936002994787532†L280-L283】.
-func (p *Character) resurrectIfNeeded() {
-    if p.HP <= 0 {
-        fmt.Printf("\n💫 %s tombe... mais ses fans le relèvent à 50 %% PV !\n", p.Name)
-        p.HP = p.MaxHP / 2
-    }
-}
-
-// resetSpecialUsage réinitialise le compteur d'utilisation de capacité spéciale
-// avant un nouveau combat.
-func (p *Character) resetSpecialUsage() {
-    p.SpecialUsed = false
-}
-
-// -----------------------------------------------------------------------------
-// Combats génériques
-
-// battleOptions définit les paramètres variables selon le type de combat.
-// Utilisé pour spécialiser les combats de tutoriel, d'entraînement ou de boss.
-type battleOptions struct {
-    AllowBet      bool // autoriser la mise en début de combat
-    BetMultiplier int  // multiplicateur de difficulté (x2, x3, x4) pour l'entraînement
-    AllowEscape   bool // autoriser la fuite
-    EnemyDesc     string // description supplémentaire pour l'ennemi
-    RewardXP      int  // gain en XP après victoire
-    RewardGold    int  // gain en or après victoire
-    RewardBet     int  // gain en points de mise après victoire (pour entraînement)
-    IsBoss        bool // indique un combat de boss (affichage différent)
-    UseDiscEffect bool // les disques empoisonnés appliquent des effets particuliers
-}
-
-// fight lance un combat entre le joueur courant et l'ennemi passé en paramètre.
-// Les options permettent d'adapter la difficulté, la mise, l'utilisation des
-// disques et les récompenses. Cette fonction est utilisée pour tous les
-// affrontements (tutoriel, entraînement, histoire, bosses).
-func (g *Game) fight(enemy Enemy, opts battleOptions, reader *bufio.Reader) bool {
-    p := g.Player
-    p.resetSpecialUsage()
-    // Mise éventuelle
-    bet := 0
-    if opts.AllowBet {
-        if p.BetPts <= 0 {
-            fmt.Println("Vous n'avez pas de points de mise. Le combat commence sans pari.")
-        } else {
-            fmt.Printf("Points de mise disponibles : %d\n", p.BetPts)
-            fmt.Println("Choisissez une mise : 1) x2  2) x3  3) x4")
-            var choice int
-            fmt.Fscanln(reader, &choice)
-            switch choice {
-            case 1:
-                bet = 2
-            case 2:
-                bet = 3
-            case 3:
-                bet = 4
-            default:
-                bet = 2
-            }
-            // Les points de mise ne sont pas retirés immédiatement : ils sont
-            // perdus en cas de défaite, gagnés en cas de victoire.
-        }
-        // Adapter la difficulté et les récompenses selon la mise
-        if bet > 0 {
-            enemy.HP = enemy.MaxHP * bet
-            enemy.MaxHP = enemy.HP
-            enemy.Attack = enemy.Attack * bet
-            opts.RewardXP *= bet
-            opts.RewardGold *= bet
-            opts.RewardBet = bet
-        }
-    }
-    // Paramètre de précision des attaques ennemies : plus la mise est haute,
-    // moins l'ennemi rate (minimum 50 %).
-    successRate := 80
-    if bet > 0 {
-        // Pour x2, x3, x4 on réduit successRate de 15 % par niveau au-delà de 2.
-        successRate = 80 - (bet-2)*15
-        if successRate < 50 {
-            successRate = 50
-        }
-    }
-
-    // Variables pour la gestion du poison via Disque de Corbeau
-    poisonTurns := 0
-    poisonDamage := 0
-
-    // Boucle de combat jusqu'à ce qu'un camp tombe à 0 PV
-    playerTurn := true
-    for p.HP > 0 && enemy.HP > 0 {
-        // Séparateur visuel pour rendre le journal de combat plus lisible
-        fmt.Println("--------------------------------------------------")
-        if playerTurn {
-            // Tour du joueur : afficher état et options
-            fmt.Printf("\n— Votre tour —\n")
-            fmt.Printf("%s : %d/%d PV | %d/%d PM\n", p.Name, p.HP, p.MaxHP, p.Mana, p.MaxMana)
-            fmt.Printf("%s : %d/%d PV\n", enemy.Name, enemy.HP, enemy.MaxHP)
-            fmt.Println("1) Attaquer (8)")
-            if p.HasNoteSpell {
-                fmt.Println("2) Note explosive (18, 10 PM)")
-            } else {
-                fmt.Println("2) (Sort verrouillé — achetez le Livre au Marchand)")
-            }
-            // Capacité spéciale (une fois par combat)
-            fmt.Println("3) Capacité spéciale")
-            fmt.Println("4) Inventaire (utiliser potion, disque ou équipement)")
-            if opts.AllowEscape {
-                fmt.Println("5) Fuir (mettre fin au combat)")
-            }
-            fmt.Print("Choix : ")
-            var action int
-            fmt.Fscanln(reader, &action)
-            switch action {
-            case 1:
-                // Attaque de base
-                dmg := 8
-                before := enemy.HP
-                enemy.HP -= dmg
-                if enemy.HP < 0 {
-                    enemy.HP = 0
-                }
-                fmt.Printf("➡️  Coup de poing ! %s %d → %d  (-%d PV)\n", enemy.Name, before, enemy.HP, before-enemy.HP)
-            case 2:
-                // Sort Note explosive
-                if !p.HasNoteSpell || p.Mana < 10 {
-                    fmt.Println("⛔ Sort indisponible.")
-                    continue
-                }
-                p.Mana -= 10
-                dmg := 18
-                before := enemy.HP
-                enemy.HP -= dmg
-                if enemy.HP < 0 {
-                    enemy.HP = 0
-                }
-                fmt.Printf("🎶 Note explosive ! %s %d → %d  (-%d PV) | PM -10\n", enemy.Name, before, enemy.HP, before-enemy.HP)
-            case 3:
-                // Capacité spéciale du personnage courant
-                if p.SpecialUsed {
-                    fmt.Println("Vous avez déjà utilisé votre capacité spéciale dans ce combat.")
-                    continue
-                }
-                // Appliquer un effet différent selon le personnage
-                switch p.Name {
-                case "Hatsune Miku":
-                    // Miku : récupère 20 Mana et 10 PV comme boost scénique
-                    beforeHP := p.HP
-                    beforeMana := p.Mana
-                    heal := 10
-                    manaGain := 20
-                    p.HP += heal
-                    if p.HP > p.MaxHP {
-                        p.HP = p.MaxHP
-                    }
-                    p.Mana += manaGain
-                    if p.Mana > p.MaxMana {
-                        p.Mana = p.MaxMana
-                    }
-                    fmt.Printf("✨ Miku entonne un solo : PV %d → %d (+%d) | PM %d → %d (+%d)\n", beforeHP, p.HP, p.HP-beforeHP, beforeMana, p.Mana, p.Mana-beforeMana)
-                case "Kaaris":
-                    // Kaaris : invoque le crew et inflige de gros dégâts instantanés
-                    dmg := 25
-                    before := enemy.HP
-                    enemy.HP -= dmg
-                    if enemy.HP < 0 {
-                        enemy.HP = 0
-                    }
-                    fmt.Printf("🔥 Kaaris invoque son crew ! %s %d → %d  (-%d PV)\n", enemy.Name, before, enemy.HP, before-enemy.HP)
-                case "Macron":
-                    // Macron : discourt et affaiblit l'adversaire pour deux tours
-                    enemy.Attack /= 2
-                    enemy.CritTimer = 4 // reporter le prochain critique
-                    fmt.Println("🗣️  Macron prononce un discours : l'adversaire est perturbé (attaque divisée par 2 pendant quelques tours).")
-                case "Michael Jackson":
-                    // MJ : Moonwalk, esquive le prochain coup et inflige des dégâts
-                    dmg := 15
-                    before := enemy.HP
-                    enemy.HP -= dmg
-                    if enemy.HP < 0 {
-                        enemy.HP = 0
-                    }
-                    fmt.Printf("🌙 Moonwalk ! %s %d → %d  (-%d PV). Vous évitez la prochaine attaque ennemie.\n", enemy.Name, before, enemy.HP, before-enemy.HP)
-                    // On indiquera un état d'esquive via un marqueur temporaire
-                    enemy.CritTimer++ // repousser critique pour simuler esquive
-                default:
-                    fmt.Println("Capacité spéciale non définie pour ce personnage.")
-                }
-                p.SpecialUsed = true
-            case 4:
-                // Utiliser un objet de l'inventaire
-                if len(p.Inventory) == 0 {
-                    fmt.Println("Votre inventaire est vide.")
-                    continue
-                }
-                fmt.Println("Inventaire :")
-                for i, it := range p.Inventory {
-                    fmt.Printf("  %d. %s (%s)\n", i+1, it.Name, it.Description)
-                }
-                fmt.Print("Sélectionnez un objet (0 pour annuler) : ")
-                var idx int
-                fmt.Fscanln(reader, &idx)
-                if idx <= 0 || idx > len(p.Inventory) {
-                    continue
-                }
-                item := p.Inventory[idx-1]
-                // Disques empoisonnés : appliquer effet spécifique sur l'ennemi
-                if strings.HasPrefix(item.Name, "Disque") {
-                    switch item.Name {
-                    case "Disque de Loup Empoisonné":
-                        dmg := 10
-                        before := enemy.HP
-                        enemy.HP -= dmg
-                        if enemy.HP < 0 {
-                            enemy.HP = 0
-                        }
-                        fmt.Printf("💿 Disque de Loup : %s %d → %d  (-%d PV)\n", enemy.Name, before, enemy.HP, before-enemy.HP)
-                    case "Disque de Troll Empoisonné":
-                        dmg := 15
-                        before := enemy.HP
-                        enemy.HP -= dmg
-                        if enemy.HP < 0 {
-                            enemy.HP = 0
-                        }
-                        fmt.Printf("💿 Disque de Troll : %s %d → %d  (-%d PV)\n", enemy.Name, before, enemy.HP, before-enemy.HP)
-                    case "Disque de Sanglier Empoisonné":
-                        // Ignore la défense : double les dégâts de votre prochain coup
-                        fmt.Println("💿 Disque de Sanglier : votre prochaine attaque ignorera la défense du boss !")
-                        enemy.Attack = enemy.Attack // pas d'effet immédiat, placeholder
-                    case "Disque de Corbeau Empoisonné":
-                        // Poison : applique 5 dégâts par tour pendant 2 tours
-                        poisonTurns = 2
-                        poisonDamage = 5
-                        fmt.Println("💿 Disque de Corbeau : l'ennemi est empoisonné pendant 2 tours !")
-                    }
-                    // Retirer l'objet une fois utilisé
-                    p.Inventory = append(p.Inventory[:idx-1], p.Inventory[idx:]...)
-                } else if item.Effect != nil {
-                    // Appliquer l'effet de la potion ou de l'augmentation
-                    consumed := item.Effect(p)
-                    if consumed {
-                        p.Inventory = append(p.Inventory[:idx-1], p.Inventory[idx:]...)
-                    }
-                } else {
-                    fmt.Println("Cet objet ne peut pas être utilisé directement.")
-                }
-            case 5:
-                if opts.AllowEscape {
-                    fmt.Println("Vous fuyez le combat…")
-                    return false
-                }
-                fmt.Println("Option invalide.")
-                continue
-            default:
-                fmt.Println("Choix invalide.")
-                continue
-            }
-            playerTurn = false
-        } else {
-            // Tour de l'ennemi
-            fmt.Println("\n— Tour de l’ennemi —")
-            // Appliquer poison si actif
-            if poisonTurns > 0 {
-                before := enemy.HP
-                enemy.HP -= poisonDamage
-                if enemy.HP < 0 {
-                    enemy.HP = 0
-                }
-                poisonTurns--
-                fmt.Printf("☠️  Le poison fait effet : %s %d → %d  (-%d PV)\n", enemy.Name, before, enemy.HP, before-enemy.HP)
-            }
-            // L'ennemi peut rater son attaque (probabilité inverse du successRate)
-            if g.rng.Intn(100) > successRate {
-                fmt.Println("🤞 L'ennemi rate son coup !")
-            } else {
-                dmg := enemy.Attack
-                // Coup critique tous les 3 tours
-                if enemy.CritTimer == 1 {
-                    dmg *= 2
-                    enemy.CritTimer = 3
-                    fmt.Println("‼️  Coup critique x2 !")
-                } else {
-                    enemy.CritTimer--
-                }
-                before := p.HP
-                p.HP -= dmg
-                if p.HP < 0 {
-                    p.HP = 0
-                }
-                fmt.Printf("💥 %s attaque : %s %d → %d  (-%d PV)\n", enemy.Name, p.Name, before, p.HP, before-p.HP)
-            }
-            playerTurn = true
-        }
-    }
-    // Détermination du vainqueur
-    if p.HP <= 0 {
-        // Défaite : résurrection et pénalité éventuelle
-        p.resurrectIfNeeded()
-        if opts.AllowBet && bet > 0 {
-            // Perte de la mise
-            p.BetPts -= bet
-            if p.BetPts < 0 {
-                p.BetPts = 0
-            }
-            fmt.Printf("Vous perdez votre mise. Points de mise restants : %d\n", p.BetPts)
-        }
-        return false
-    }
-    // Victoire : distribution des récompenses
-    fmt.Println("\n🏆 Victoire !")
-    p.XP += opts.RewardXP
-    p.Gold += opts.RewardGold
-    if opts.AllowBet && bet > 0 {
-        p.BetPts += opts.RewardBet
-        fmt.Printf("Points de mise +%d (total : %d)\n", opts.RewardBet, p.BetPts)
-    }
-    // Level‑up éventuel
-    p.levelUpIfNeeded()
-    return true
-}
-
-// -----------------------------------------------------------------------------
-// Système de craft (forgeron / ingénieur du son)
-
-// handleCraft permet au joueur de sélectionner une recette et de la fabriquer
-// si les ressources nécessaires sont disponibles.
-func (g *Game) handleCraft(reader *bufio.Reader) {
-    fmt.Println("\n=== Forgeron / Ingé son ===")
-    fmt.Println("Recettes disponibles :")
-    for i, r := range g.Recipes {
-        fmt.Printf("%d) %s -> %s\n", i+1, strings.Join(r.Inputs, ", "), r.Name)
-    }
-    fmt.Println("0) Retour")
-    fmt.Print("Choisissez une recette : ")
-    var choice int
-    fmt.Fscanln(reader, &choice)
-    if choice <= 0 || choice > len(g.Recipes) {
-        return
-    }
-    recipe := g.Recipes[choice-1]
-    if !g.Player.removeItems(recipe.Inputs) {
-        fmt.Println("Il vous manque des matériaux pour fabriquer cela.")
-        return
-    }
-    // Ajout de l'objet créé à l'inventaire
-    if g.Player.addItem(recipe.Output) {
-        fmt.Printf("Vous avez fabriqué %s !\n", recipe.Name)
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Marchand : achat d'objets et de matériaux
-
-// handleMerchant gère l'interaction avec le disquaire (boutique).
-func (g *Game) handleMerchant(reader *bufio.Reader) {
-    fmt.Println("\n=== Disquaire ===")
-    fmt.Println("Bienvenue dans ma boutique ! Que désirez-vous ?")
-    for i, item := range g.Merchant {
-        fmt.Printf("%d) %s (%s) - %d or\n", i+1, item.Name, item.Description, item.Price)
-    }
-    fmt.Println("0) Retour")
-    fmt.Printf("Or disponible : %d\n", g.Player.Gold)
-    fmt.Print("Choisissez un article à acheter : ")
-    var choice int
-    fmt.Fscanln(reader, &choice)
-    if choice <= 0 || choice > len(g.Merchant) {
-        return
-    }
-    item := g.Merchant[choice-1]
-    if g.Player.Gold < item.Price {
-        fmt.Println("Vous n’avez pas assez de fans pour payer (or insuffisant).")
-        return
-    }
-    if g.Player.addItem(item) {
-        g.Player.Gold -= item.Price
-        fmt.Printf("Vous achetez %s.\n", item.Name)
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Histoire et chapitres
-
-// runPrologue raconte l'introduction et propose un combat tutoriel sans mise.
-func (g *Game) runPrologue(reader *bufio.Reader) {
-    if g.StoryStage > 0 {
-        return
-    }
-    fmt.Println("\n=== Prologue : Perte de la Cassette ===")
-    fmt.Println("La cassette légendaire, source de toute bonne musique, vient d’être volée.")
-    fmt.Println("Le label Pouler.fr, qui contrôle 90 % du PIB musical mondial, la détient désormais【936002994787532†L36-L49】.")
-    fmt.Println("Derrière cette organisation se cachent Mattieu Berger et Sylvain Bagland, bien décidés à étouffer la créativité.\n")
-    fmt.Println("Hatsune Miku, idole digitale, jure de récupérer la cassette et de rendre la musique au public.")
-    fmt.Println("Pour te préparer, tu vas affronter un hater en combat d’entraînement.")
-    fmt.Print("Lancer un court combat tutoriel ? 1) Oui  2) Non : ")
-    var ans int
-    fmt.Fscanln(reader, &ans)
-    if ans == 1 {
-        // Combat tutoriel sans mise
-        tutEnemy := Enemy{Name: "Hater (Tutoriel)", HP: 20, MaxHP: 20, Attack: 5, CritTimer: 3}
-        opts := battleOptions{AllowBet: false, AllowEscape: false, RewardXP: 10, RewardGold: 3}
-        g.fight(tutEnemy, opts, reader)
-    }
-    fmt.Println("\nLe prologue est terminé. Tu peux désormais avancer dans l'histoire ou t'entraîner.")
-    g.StoryStage = 1
-}
-
-// runHatersStage correspond au chapitre « Les Haters du Label ». Le joueur
-// affronte plusieurs haters pour gagner de l'expérience et des matériaux.
-func (g *Game) runHatersStage(reader *bufio.Reader) {
-    fmt.Println("\n=== Chapitre 2 : Les Haters du Label ===")
-    fmt.Println("Le label envoie des fans toxiques te barrer la route. Affronte-les pour prouver ta valeur.")
-    // Deux combats d'entraînement, difficulté croissante mais progressive
-    for i := 1; i <= 2; i++ {
-        fmt.Printf("\n— Combat contre un Hater %d —\n", i)
-        // Les premiers ennemis ont moins de PV et de puissance
-        baseHP := 20 + 5*(i-1)    // 20 puis 25 PV
-        baseAtk := 5 + (i - 1)    // 5 puis 6 dégâts
-        enemy := Enemy{Name: "Hater", HP: baseHP, MaxHP: baseHP, Attack: baseAtk, CritTimer: 3}
-        opts := battleOptions{AllowBet: true, AllowEscape: false, RewardXP: 15, RewardGold: 5}
-        g.fight(enemy, opts, reader)
-        // Récompense : un matériau aléatoire
-        mat := g.Materials[g.rng.Intn(len(g.Materials))]
-        g.Player.addItem(mat)
-        fmt.Printf("Vous trouvez un %s dans les décombres.\n", mat.Name)
-        // Progession : le joueur gagne 10 PV max et l'ennemi progresse de 5 PV pour les prochains combats
-        g.Player.MaxHP += 10
-        g.Player.HP += 10
-        if g.Player.HP > g.Player.MaxHP {
-            g.Player.HP = g.Player.MaxHP
-        }
-        g.TrainingEnemyBaseHP += 5
-        fmt.Println("Votre endurance augmente (+10 PV max) et les ennemis deviennent un peu plus résistants (+5 PV).")
-    }
-    fmt.Println("\nAprès avoir repoussé les haters, vous avez gagné de l'expérience, de l'or et des matériaux.")
-    fmt.Println("Vous pouvez maintenant rencontrer des artistes légendaires qui vous aideront dans votre quête.")
-    g.StoryStage = 2
-}
-
-// askQuestion pose une question de quiz et retourne vrai si la réponse est correcte.
-func askQuestion(reader *bufio.Reader, question string, correct string) bool {
-    fmt.Println(question)
-    fmt.Print("Votre réponse : ")
-    ans, _ := reader.ReadString('\n')
-    ans = strings.TrimSpace(strings.ToLower(ans))
-    return ans == strings.ToLower(correct)
-}
-
-// meetMichaelJackson met en scène la rencontre avec Michael Jackson. Un
-// mini-jeu (question) permet de débloquer le personnage et d'obtenir le
-// Gant Légendaire.
-func (g *Game) meetMichaelJackson(reader *bufio.Reader) {
-    if g.Characters[3].Unlocked {
-        return
-    }
-    fmt.Println("\n=== Rencontre avec Michael Jackson ===")
-    fmt.Println("Sur ta route, le Roi de la Pop apparaît, triste de l'état de la musique actuelle.")
-    fmt.Println("Il t'interroge pour voir si tu connais la culture musicale.")
-    question := "Quel est le titre du pas iconique exécuté par Michael Jackson lors du 25e anniversaire de Motown (Moonwalk/Robot/Shuffle) ?"
-    if askQuestion(reader, question, "moonwalk") {
-        fmt.Println("Correct ! MJ est impressionné par ta culture et décide de t'aider.")
-        // Débloquer MJ et offrir le Gant Légendaire (+25 PV max)
-        g.Characters[3].Unlocked = true
-        // Ajouter le Gant à l'inventaire du joueur
-        glove := Item{Name: "Gant Légendaire", Type: Equipment, Description: "+25 PV max", Price: 0, Effect: func(p *Character) bool {
-            p.MaxHP += 25
-            p.HP += 25
-            fmt.Println("Vous équipez le Gant Légendaire, votre PV max augmente de 25 !")
-            return true
-        }}
-        g.Player.addItem(glove)
-        fmt.Println("Michael Jackson rejoint votre équipe !")
-        g.Characters[3].Gold = 0
-        g.Characters[3].BetPts = 0
-    } else {
-        fmt.Println("Mauvaise réponse. MJ part déçu, mais reviendra peut-être plus tard.")
-    }
-}
-
-// meetKaaris met en scène la rencontre avec Kaaris. Le joueur doit affronter
-// un crew de la rue pour obtenir le Pouvoir d'Invocation et débloquer
-// Kaaris comme personnage jouable.
-func (g *Game) meetKaaris(reader *bufio.Reader) {
-    if g.Characters[1].Unlocked {
-        return
-    }
-    fmt.Println("\n=== Rencontre avec Kaaris ===")
-    fmt.Println("Kaaris surgit de la cité et te met au défi : vaincs son crew pour gagner son respect.")
-    // Combat spécial contre un sbire costaud (utiliser Disque de Troll pour avantage)
-    // Équipe réduite pour rendre le combat accessible
-    enemy := Enemy{Name: "Crew de Kaaris", HP: 50, MaxHP: 50, Attack: 10, CritTimer: 3}
-    opts := battleOptions{AllowBet: false, AllowEscape: false, RewardXP: 20, RewardGold: 10, UseDiscEffect: true}
-    if g.fight(enemy, opts, reader) {
-        fmt.Println("Kaaris est impressionné par ta force.")
-        g.Characters[1].Unlocked = true
-        // Pouvoir d'invocation : objet spécial permettant d'invoquer le crew une fois par combat
-        crewPower := Item{Name: "Pouvoir d’Invocation", Type: Special, Description: "Invoque le crew de Kaaris", Price: 0, Effect: func(p *Character) bool {
-            // Effet : infliger 25 dégâts instantanés
-            fmt.Println("Vous invoquez le crew de Kaaris et infligez 25 dégâts supplémentaires !")
-            return true
-        }}
-        g.Player.addItem(crewPower)
-        fmt.Println("Kaaris rejoint votre équipe !")
-    } else {
-        fmt.Println("Kaaris n'est pas convaincu. Retente ta chance plus tard.")
-    }
-}
-
-// meetMacron propose un quiz de culture générale (3 questions) pour obtenir
-// le Pass Présidentiel et débloquer Macron.
-func (g *Game) meetMacron(reader *bufio.Reader) {
-    if g.Characters[2].Unlocked {
-        return
-    }
-    fmt.Println("\n=== Rencontre avec Macron ===")
-    fmt.Println("Sur ta route se dresse le Président, gardien du label. Il teste ta culture générale.")
-    questions := []struct{ q, a string }{
-        {"En quelle année la Révolution française a-t-elle débuté ?", "1789"},
-        {"Quelle est la devise de la République française (3 mots) ?", "liberté egalité fraternité"},
-        {"Qui a composé La Marseillaise ?", "rouget de lisle"},
-    }
-    correctAnswers := 0
-    for _, qa := range questions {
-        if askQuestion(reader, qa.q, qa.a) {
-            fmt.Println("Bonne réponse.")
-            correctAnswers++
-        } else {
-            fmt.Println("Mauvaise réponse.")
-        }
-    }
-    if correctAnswers == len(questions) {
-        fmt.Println("Macron reconnaît ta culture et t'accorde un Pass Présidentiel.")
-        g.Characters[2].Unlocked = true
-        pass := Item{Name: "Pass Présidentiel", Type: Special, Description: "Permet d’accéder au QG du label", Price: 0, Effect: func(p *Character) bool {
-            fmt.Println("Vous utilisez le Pass Présidentiel pour ouvrir une porte... rien ne se passe pour le moment.")
-            return false
-        }}
-        g.Player.addItem(pass)
-        fmt.Println("Macron rejoint votre équipe (peut affaiblir les adversaires) !")
-    } else {
-        fmt.Println("Macron t'invite à réviser et à revenir plus tard.")
-    }
-}
-
-// runArtistsStage exécute le chapitre « Les Artistes Clés » en rencontrant
-// successivement Michael Jackson, Kaaris et Macron. Chaque rencontre peut
-// débloquer un personnage et un objet spécial.
-func (g *Game) runArtistsStage(reader *bufio.Reader) {
-    fmt.Println("\n=== Chapitre 3 : Les Artistes Clés ===")
-    fmt.Println("Tu vas croiser des artistes légendaires. Réussis leurs épreuves pour qu'ils t'aident.")
-    // Rencontre avec MJ
-    g.meetMichaelJackson(reader)
-    // Rencontre avec Kaaris
-    g.meetKaaris(reader)
-    // Rencontre avec Macron
-    g.meetMacron(reader)
-    fmt.Println("\nAprès avoir rencontré ces artistes, ton équipe s'agrandit et tu obtiens de précieux objets.")
-    g.StoryStage = 3
-}
-
-// runRivalesStage conduit le joueur à affronter les 4 rivales du label.
-func (g *Game) runRivalesStage(reader *bufio.Reader) {
-    fmt.Println("\n=== Chapitre 4 : Les Rivales ===")
-    fmt.Println("Les quatre rivales du label t'attendent. Chacune incarne un style musical et possède une attaque spéciale.")
-    // Définir les rivales et leurs caractéristiques
-    rivales := []Enemy{
-        // Les PV et dégâts sont réduits pour une progression plus douce
-        {Name: "Rivale Pop", HP: 60, MaxHP: 60, Attack: 8, CritTimer: 3, Style: "Pop"},
-        {Name: "Rivale Rap", HP: 70, MaxHP: 70, Attack: 9, CritTimer: 3, Style: "Rap"},
-        {Name: "Rivale Rock", HP: 80, MaxHP: 80, Attack: 10, CritTimer: 3, Style: "Rock"},
-        {Name: "Rivale Classique", HP: 90, MaxHP: 90, Attack: 11, CritTimer: 3, Style: "Classique"},
-    }
-    for _, boss := range rivales {
-        fmt.Printf("\nTu affrontes %s. Prépare-toi !\n", boss.Name)
-        // Permettre au joueur de choisir son personnage avant chaque boss
-        g.chooseCharacter(reader)
-        opts := battleOptions{AllowBet: false, AllowEscape: false, RewardXP: 30, RewardGold: 15, IsBoss: true, UseDiscEffect: true}
-        g.fight(boss, opts, reader)
-        // Après chaque victoire, offrir un matériau rare ou des potions
-        rewardMat := g.Materials[g.rng.Intn(len(g.Materials))]
-        g.Player.addItem(rewardMat)
-        fmt.Printf("Vous récupérez %s comme trophée.\n", rewardMat.Name)
-    }
-    fmt.Println("\nLes rivales sont vaincues. Le chemin vers le label est désormais ouvert.")
-    g.StoryStage = 4
-}
-
-// runFinalStage affronte le boss final du label (Mattieu Berger & Sylvain Bagland)
-// et conclut l'histoire.
-func (g *Game) runFinalStage(reader *bufio.Reader) {
-    fmt.Println("\n=== Chapitre 5 : Le Label Pouler.fr ===")
-    fmt.Println("Le moment est venu d'affronter les dirigeants de Pouler.fr et de récupérer la cassette légendaire.")
-    // Préparation : vérifie que le joueur possède le Pass Présidentiel
-    if g.Player.findItem("Pass Présidentiel") < 0 {
-        fmt.Println("Vous avez besoin du Pass Présidentiel pour entrer au QG. Retournez voir Macron.")
-        return
-    }
-    // Combat final : un ennemi très puissant
-    // Boss final légèrement réduit pour éviter un pic de difficulté trop abrupt
-    finalBoss := Enemy{Name: "Mattieu & Sylvain", HP: 150, MaxHP: 150, Attack: 14, CritTimer: 3, Style: "Boss"}
-    opts := battleOptions{AllowBet: false, AllowEscape: false, RewardXP: 100, RewardGold: 50, IsBoss: true, UseDiscEffect: true}
-    // Permettre au joueur de choisir son personnage pour le combat final
-    g.chooseCharacter(reader)
-    if g.fight(finalBoss, opts, reader) {
-        fmt.Println("\n🎉 Félicitations ! Vous avez vaincu les dirigeants du label Pouler.fr et récupéré la Cassette Légendaire.")
-        fmt.Println("La vraie musique appartient aux artistes et au public, pas aux labels !【936002994787532†L327-L332】")
-        fmt.Println("Fin du jeu. Merci d’avoir joué !\n")
-        g.StoryStage = 5
-    } else {
-        fmt.Println("Les dirigeants ont eu raison de vous. Réessayez lorsque vous serez prêt.")
-    }
-}
-
-// runNextStory déclenche le chapitre suivant en fonction de la progression
-// actuelle. Si tous les chapitres sont terminés, un message final est affiché.
 func (g *Game) runNextStory(reader *bufio.Reader) {
     switch g.StoryStage {
-    case 0:
-        g.runPrologue(reader)
-    case 1:
-        g.runHatersStage(reader)
-    case 2:
-        g.runArtistsStage(reader)
-    case 3:
-        g.runRivalesStage(reader)
-    case 4:
-        g.runFinalStage(reader)
-    case 5:
-        fmt.Println("\nVous avez déjà terminé l'histoire complète. Profitez du jeu librement !")
-    default:
-        fmt.Println("Une erreur s'est produite dans la progression de l'histoire.")
+    case stagePrologue:
+        g.prologue(reader)
+    case stageArtists:
+        g.artistHub(reader)
+    case stageMacron:
+        g.macronMission(reader)
+    case stageLabel:
+        g.labelFinal(reader)
+    case stageFinish:
+        fmt.Println("L'histoire principale est terminee. Continuez a jouer librement !")
     }
 }
 
-// showMainMenu affiche les options principales disponibles à tout moment.
-func showMainMenu() {
-    fmt.Println("\n===== Menu Principal =====")
-    fmt.Println("1) Continuer l'histoire")
-    fmt.Println("2) Entraînement (mises x2/x3/x4)")
-    fmt.Println("3) Statistiques du personnage")
-    fmt.Println("4) Marchand (disquaire)")
-    fmt.Println("5) Forgeron / Craft")
-    fmt.Println("6) Changer de personnage")
-    fmt.Println("7) Quitter")
-    fmt.Print("Choix : ")
-}
-
-// run lance la boucle principale du jeu, en proposant le prologue puis
-// les différentes options jusqu'à ce que le joueur quitte.
-func (g *Game) run() {
-    reader := bufio.NewReader(os.Stdin)
-    // Exécution du prologue dès le lancement
-    g.runPrologue(reader)
+func (g *Game) run(reader *bufio.Reader) {
+    if g.StoryStage == stagePrologue {
+        g.prologue(reader)
+    }
     for {
-        showMainMenu()
-        var choice int
-        fmt.Fscanln(reader, &choice)
-        switch choice {
-        case 1:
+        banner("Menu principal")
+        active := g.active()
+        fmt.Printf("Profil: %s | Or: %d | Perso: %s | Points de mise: %d\n", g.profile, g.Gold, active.Name, active.BetPts)
+        fmt.Println("1) Continuer l'histoire")
+        fmt.Println("2) Entrainement")
+        fmt.Println("3) Farm d'EXP")
+        fmt.Println("4) Statistiques")
+        fmt.Println("5) Marchand")
+        if g.CraftUnlocked {
+            fmt.Println("6) Forgeron / Craft")
+        } else {
+            fmt.Println("6) Forgeron / Craft (verrouille)")
+        }
+        fmt.Println("7) Changer de personnage")
+        fmt.Println("8) Sauvegarder")
+        fmt.Println("9) Quitter")
+        fmt.Print("Choix: ")
+        switch read(reader) {
+        case "1":
             g.runNextStory(reader)
-        case 2:
-            // Combat d'entraînement avec mise et progression dynamique
-            g.runTraining(reader)
-        case 3:
-            g.Player.showStats()
-        case 4:
+        case "2":
+            g.training(reader)
+        case "3":
+            g.farm(reader)
+        case "4":
+            active.printStats()
+        case "5":
             g.handleMerchant(reader)
-        case 5:
+        case "6":
             g.handleCraft(reader)
-        case 6:
+        case "7":
             g.chooseCharacter(reader)
-        case 7:
-            fmt.Println("Au revoir et à bientôt !")
+        case "8":
+            g.autoSave()
+        case "9":
+            g.autoSave()
+            fmt.Println("Merci d'avoir defendu la musique libre !")
             return
         default:
-            fmt.Println("Choix invalide. Veuillez réessayer.")
+            fmt.Println("Choix invalide.")
         }
     }
 }
 
-// runTraining lance un combat d'entraînement contre un hater dont la difficulté
-// augmente progressivement. En cas de victoire, le joueur gagne 10 PV max et
-// les ennemis gagnent 5 PV pour la prochaine séance. Les mises x2/x3/x4
-// sont toujours possibles et ajustent également les récompenses.
-func (g *Game) runTraining(reader *bufio.Reader) {
-    fmt.Println("\n=== Séance d'entraînement ===")
-    // Générer un ennemi basé sur les valeurs de progression actuelles
-    baseHP := g.TrainingEnemyBaseHP
-    baseAtk := g.TrainingEnemyBaseAttack
-    enemy := Enemy{Name: "Hater", HP: baseHP, MaxHP: baseHP, Attack: baseAtk, CritTimer: 3}
-    opts := battleOptions{AllowBet: true, AllowEscape: false, RewardXP: 10, RewardGold: 5}
-    // Combattre ; si victoire, ajuster les statistiques
-    if g.fight(enemy, opts, reader) {
-        // Augmenter les PV max du joueur de 10 et soigner proportionnellement
-        g.Player.MaxHP += 10
-        g.Player.HP += 10
-        if g.Player.HP > g.Player.MaxHP {
-            g.Player.HP = g.Player.MaxHP
-        }
-        fmt.Printf("🎁 Votre endurance augmente : PV max +10 (nouveau max : %d)\n", g.Player.MaxHP)
-        // Augmenter la difficulté de l'entraînement
-        g.TrainingEnemyBaseHP += 5
-        fmt.Println("Les ennemis d'entraînement deviennent un peu plus résistants (+5 PV).")
-    } else {
-        fmt.Println("Continuez à vous entraîner pour progresser.")
-    }
-}
-
-// main est le point d'entrée du programme. Il crée une nouvelle partie et
-// appelle run() pour lancer l'interface utilisateur.
 func main() {
-    game := NewGame()
-    game.run()
+    reader := bufio.NewReader(os.Stdin)
+    sm := newSaveManager(saveDirName)
+    profile, state := promptProfile(sm, reader)
+    game := newGame(sm, profile, state)
+    game.run(reader)
 }
+
+func printEnemies(enemies []Enemy) {
+    for i, e := range enemies {
+        status := fmt.Sprintf("%d/%d HP", e.HP, e.MaxHP)
+        if e.HP <= 0 {
+            status = "KO"
+        }
+        fmt.Printf("  %d) %s (%s)\n", i+1, e.Name, status)
+    }
+}
+
+
+
+
