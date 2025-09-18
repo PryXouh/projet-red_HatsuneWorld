@@ -1217,7 +1217,7 @@ func (g *Game) zoneKaaris(reader *bufio.Reader) {
     if g.consumeMenuReturn() {
         return
     }
-    g.fightSolo(reader, Enemy{Name: "Haineux de quartier", Type: enemyCrew, MaxHP: 70, HP: 70, Attack: 7, CritTimer: 3, Style: "Rue"}, battleOptions{
+    g.fightSolo(reader, Enemy{Name: "Haineux de quartier", Type: enemyCrew, MaxHP: 55, HP: 55, Attack: 6, CritTimer: 3, Style: "Rue"}, battleOptions{
         AllowBet:     true,
         Intro:        []string{"Le beat tombe a 90 BPM, les coudes aussi."},
         Victory:      []string{"Le crew de reserve se retire."},
@@ -1232,7 +1232,7 @@ func (g *Game) zoneKaaris(reader *bufio.Reader) {
         "Kaaris pose le micro entre vous.",
         "Kaaris: \"Maintenant c'est moi que tu dois convaincre.\"",
     )
-    duel := Enemy{Name: "Duel avec Kaaris", Type: enemyCrew, MaxHP: 95, HP: 95, Attack: 10, CritTimer: 2, Style: "Drill"}
+    duel := Enemy{Name: "Duel avec Kaaris", Type: enemyCrew, MaxHP: 80, HP: 80, Attack: 8, CritTimer: 3, Style: "Drill"}
     if g.fightSolo(reader, duel, battleOptions{
         Intro:      []string{"Le crew entoure le ring improvise."},
         Victory:    []string{"Kaaris: \"Respect. J'entre dans ton equipe.\""},
